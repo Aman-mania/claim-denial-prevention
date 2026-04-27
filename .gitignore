@@ -1,0 +1,68 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# ── Virtual environment ───────────────────────────────────────────────────────
+venv/
+env/
+.env/
+.venv/
+ENV/
+
+# ── Data — never commit raw or processed data ─────────────────────────────────
+data/raw/
+data/bronze/
+data/silver/
+data/gold/
+data/analytics/
+*.parquet
+# Keep the data/ directory itself tracked (empty dirs need a .gitkeep)
+
+# ── Environment variables ─────────────────────────────────────────────────────
+.env
+*.env
+.env.local
+.env.production
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+logs/
+*.log
+
+# ── Models (Week 5+) ──────────────────────────────────────────────────────────
+models/
+*.joblib
+*.pkl
+*.pickle
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
