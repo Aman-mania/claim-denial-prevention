@@ -44,7 +44,9 @@ def main() -> int:
     setup_logging(level="INFO")
 
     print()
+    print("╔══════════════════════════════════════════════════════════════╗")
     print("║   Claim Denial Prevention — Week 1: Bronze Layer Ingestion  ║")
+    print("╚══════════════════════════════════════════════════════════════╝")
 
     # ── Step 1: Ingest ─────────────────────────────────────────────────────────
     print("\n[ Step 1/2 ] Running ingestion pipeline …\n")
@@ -53,8 +55,11 @@ def main() -> int:
     report = pipeline.run()
 
     any_failed = False
+    print("\n  ┌─────────────────────────────────────────────────────────┐")
     print("  │  Ingestion Summary                                      │")
+    print("  ├──────────────────┬──────────┬────────────────────────────┤")
     print(f"  │ {'Dataset':<16}  │ {'Rows':>8} │ {'Status':<26} │")
+    print("  ├──────────────────┼──────────┼────────────────────────────┤")
 
     for name, result in report["datasets"].items():
         status   = result["status"]
@@ -67,6 +72,8 @@ def main() -> int:
         symbol = "✓" if status == "success" else "✗"
         print(f"  │ {symbol} {name:<15}│ {str(rows):>8} │ {status + val_flag:<26} │")
 
+    print("  └──────────────────┴──────────┴────────────────────────────┘")
+
     # ── Step 2: Profile ────────────────────────────────────────────────────────
     print("\n[ Step 2/2 ] Running data profiler …\n")
 
@@ -76,10 +83,12 @@ def main() -> int:
 
     # ── Done ───────────────────────────────────────────────────────────────────
     print()
+    print("╔══════════════════════════════════════════════════════════════╗")
     if any_failed:
         print("║   ✗  Bronze layer incomplete — check errors above.          ║")
     else:
         print("║   ✓  Bronze layer complete. Ready for Week 2 analytics.     ║")
+    print("╚══════════════════════════════════════════════════════════════╝")
     print()
 
     return 1 if any_failed else 0

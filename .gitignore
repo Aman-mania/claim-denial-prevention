@@ -21,6 +21,8 @@ ENV/
 data/raw/
 data/bronze/
 data/silver/
+data/analytics/
+data/silver/
 data/gold/
 data/analytics/
 *.parquet
