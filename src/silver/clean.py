@@ -34,10 +34,17 @@ import pandera as pa
 import structlog
 
 from src.silver.schema import SILVER_SCHEMA_REGISTRY
+from src.constants import (
+    SENTINEL_MISSING, SENTINEL_UNKNOWN,
+    SILVER_META_COLS,
+    COL_DIAG_MISSING, COL_PROC_MISSING, COL_AMOUNT_MISSING,
+    COL_LOC_MISSING, COL_PROC_NO_DIAG, COL_DIAG_NO_PROC,
+)
 
 logger = structlog.get_logger(__name__)
 
-_META_COLS = frozenset({"ingestion_timestamp", "source_file"})
+# Pipeline metadata cols — imported from src/constants.py
+_META_COLS = SILVER_META_COLS
 
 
 class SilverCleaningPipeline:
@@ -104,16 +111,16 @@ class SilverCleaningPipeline:
             df.loc[invalid_amount, "billed_amount"] = None
 
         # 4. Flags captured BEFORE sentinel fill — flags reflect original raw nulls
-        df["diagnosis_code_missing"] = df["diagnosis_code"].isnull()
-        df["procedure_code_missing"] = df["procedure_code"].isnull()
-        df["billed_amount_missing"]  = df["billed_amount"].isnull()
+        df[COL_DIAG_MISSING] = df["diagnosis_code"].isnull()
+        df[COL_PROC_MISSING] = df["procedure_code"].isnull()
+        df[COL_AMOUNT_MISSING]  = df["billed_amount"].isnull()
 
         # 5. Sentinel fill for string code columns
         #    "MISSING" replaces null codes so downstream code never gets null strings.
         #    The flag columns above are the source of truth for ML features.
         #    billed_amount is intentionally NOT filled — never impute financial data.
-        df["diagnosis_code"] = df["diagnosis_code"].fillna("MISSING")
-        df["procedure_code"] = df["procedure_code"].fillna("MISSING")
+        df["diagnosis_code"] = df["diagnosis_code"].fillna(SENTINEL_MISSING)
+        df["procedure_code"] = df["procedure_code"].fillna(SENTINEL_MISSING)
 
         # 7. Dedup by claim_id — keep first occurrence
         dupe_mask = df.duplicated(subset=["claim_id"], keep="first")
@@ -125,8 +132,8 @@ class SilverCleaningPipeline:
         #    Set AFTER sentinel fill so "MISSING" codes are treated as absent.
         #    proc_no_diag: procedure billed without a diagnosis code — primary denial trigger
         #    diag_no_proc: diagnosis documented but no procedure billed — incomplete claim
-        df["proc_no_diag"] = (df["procedure_code"] != "MISSING") & (df["diagnosis_code"] == "MISSING")
-        df["diag_no_proc"] = (df["diagnosis_code"] != "MISSING") & (df["procedure_code"] == "MISSING")
+        df[COL_PROC_NO_DIAG] = (df["procedure_code"] != SENTINEL_MISSING) & (df["diagnosis_code"] == SENTINEL_MISSING)
+        df[COL_DIAG_NO_PROC] = (df["diagnosis_code"] != SENTINEL_MISSING) & (df["procedure_code"] == SENTINEL_MISSING)
 
         # 9. Silver metadata
         df["silver_timestamp"] = self._run_ts
@@ -151,8 +158,8 @@ class SilverCleaningPipeline:
         # Title-case location and specialty for consistency
         df["specialty"] = df["specialty"].str.title()
         # Flag missing location BEFORE fill, then sentinel fill
-        df["location_missing"] = df["location"].isnull()
-        df["location"] = df["location"].fillna("Unknown").str.title()
+        df[COL_LOC_MISSING] = df["location"].isnull()
+        df["location"] = df["location"].fillna(SENTINEL_UNKNOWN).str.title()
 
         # Deduplicate by provider_id
         dupe_mask = df.duplicated(subset=["provider_id"], keep="first")
@@ -211,7 +218,7 @@ class SilverCleaningPipeline:
             return {"status": "skipped", "errors": None}
 
         # Exclude metadata and silver_timestamp columns from schema check
-        skip = _META_COLS | {"silver_timestamp", "date"}
+        skip = _META_COLS | {"date"}
         validate_cols = [c for c in df.columns if c not in skip]
         df_check = df[validate_cols]
 

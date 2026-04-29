@@ -10,6 +10,8 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from src.constants import DASHBOARD_CACHE_TTL
+
 from src.analytics.aggregations import (
     compute_claims_by_diagnosis, compute_claims_by_provider,
     compute_claims_timeline, compute_cost_analysis,
@@ -21,7 +23,7 @@ from dev_dashboard.components.charts import (
 )
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=DASHBOARD_CACHE_TTL, show_spinner=False)
 def _load_bronze(bronze_dir: Path) -> tuple[pd.DataFrame, ...]:
     def _read(name: str) -> pd.DataFrame:
         path = bronze_dir / name / f"{name}_bronze.parquet"

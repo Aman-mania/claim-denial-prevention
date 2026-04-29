@@ -23,6 +23,7 @@ import streamlit as st
 from src.config import setup_logging
 from tabs.raw_data import render_raw_tab
 from tabs.clean_data import render_clean_tab
+from tabs.ml_analysis import render_ml_tab
 
 # Configure logging (silent for the dashboard — logs go to terminal)
 setup_logging(level="WARNING")
@@ -30,6 +31,8 @@ setup_logging(level="WARNING")
 # ── Paths ──────────────────────────────────────────────────────────────────────
 BRONZE_DIR = _ROOT / "data" / "bronze"
 SILVER_DIR = _ROOT / "data" / "silver"
+GOLD_DIR   = _ROOT / "data" / "gold"
+MODELS_DIR = _ROOT / "models"
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -60,6 +63,31 @@ with st.sidebar:
         else:
             st.error(f"Ingestion failed:\n{result.stderr[:500]}")
 
+    if st.button("⚙️ Re-run Gold Pipeline", use_container_width=True):
+        import subprocess
+        result = subprocess.run(
+            [sys.executable, str(_ROOT / "run_gold.py")],
+            capture_output=True, text=True, cwd=str(_ROOT),
+        )
+        if result.returncode == 0:
+            st.success("Gold pipeline complete. Refresh the page.")
+            st.cache_data.clear()
+        else:
+            st.error(f"Gold failed:\n{result.stderr[:500]}")
+
+    if st.button("🤖 Re-run Model Training", use_container_width=True):
+        import subprocess
+        result = subprocess.run(
+            [sys.executable, str(_ROOT / "run_train.py")],
+            capture_output=True, text=True, cwd=str(_ROOT),
+        )
+        if result.returncode == 0:
+            st.success("Training complete. Refresh the page.")
+            st.cache_data.clear()
+            st.cache_resource.clear()
+        else:
+            st.error(f"Training failed:\n{result.stderr[:500]}")
+
     if st.button("🧹 Re-run Silver Cleaning", use_container_width=True):
         import subprocess
         result = subprocess.run(
@@ -81,13 +109,18 @@ with st.sidebar:
     st.markdown("**Data Status**")
     bronze_ok = (BRONZE_DIR / "claims" / "claims_bronze.parquet").exists()
     silver_ok  = (SILVER_DIR / "claims" / "claims_silver.parquet").exists()
+    gold_ok   = (GOLD_DIR   / "gold_claim_features.parquet").exists()
+    models_ok = (MODELS_DIR / "training_report.json").exists()
     st.markdown(f"{'✅' if bronze_ok else '❌'} Bronze layer")
     st.markdown(f"{'✅' if silver_ok  else '⚠️'} Silver layer")
+    st.markdown(f"{'✅' if gold_ok   else '⚠️'} Gold layer")
+    st.markdown(f"{'✅' if models_ok else '⚠️'} ML models")
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
-tab_raw, tab_clean = st.tabs([
+tab_raw, tab_clean, tab_ml = st.tabs([
     "📊 Raw Data (Bronze)",
     "✨ Clean Data (Silver)",
+    "🤖 ML Model (Week 4)",
 ])
 
 with tab_raw:
@@ -95,3 +128,6 @@ with tab_raw:
 
 with tab_clean:
     render_clean_tab(bronze_dir=BRONZE_DIR, silver_dir=SILVER_DIR)
+
+with tab_ml:
+    render_ml_tab(gold_dir=GOLD_DIR, models_dir=MODELS_DIR)

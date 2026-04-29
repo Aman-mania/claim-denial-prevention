@@ -26,6 +26,8 @@ import numpy as np
 import pandas as pd
 import structlog
 
+from src.constants import BRONZE_META_COLS
+
 logger = structlog.get_logger(__name__)
 
 # Default ID column per dataset — used for duplicate-by-ID detection.
@@ -36,8 +38,8 @@ _DEFAULT_ID_COLS: dict[str, str] = {
     "cost":      "procedure_code",
 }
 
-# Bronze metadata columns — excluded from all profile calculations.
-_META_COLS = frozenset({"ingestion_timestamp", "source_file"})
+# Bronze metadata columns — imported from src/constants.py
+_META_COLS = BRONZE_META_COLS
 
 
 class DataProfiler:

@@ -9,6 +9,8 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from src.constants import DASHBOARD_CACHE_TTL, SILVER_META_COLS
+
 from src.analytics.aggregations import (
     compute_billed_distribution,
     compute_claim_completeness,
@@ -28,7 +30,7 @@ from dev_dashboard.components.charts import (
 )
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=DASHBOARD_CACHE_TTL, show_spinner=False)
 def _load_silver(silver_dir: Path) -> tuple[pd.DataFrame, ...]:
     def _read(name: str) -> pd.DataFrame:
         path = silver_dir / name / f"{name}_silver.parquet"
@@ -36,7 +38,7 @@ def _load_silver(silver_dir: Path) -> tuple[pd.DataFrame, ...]:
     return _read("claims"), _read("providers"), _read("diagnosis"), _read("cost")
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=DASHBOARD_CACHE_TTL, show_spinner=False)
 def _load_bronze_claims(bronze_dir: Path) -> pd.DataFrame:
     path = bronze_dir / "claims" / "claims_bronze.parquet"
     return pd.read_parquet(path) if path.exists() else pd.DataFrame()
@@ -227,7 +229,7 @@ def render_clean_tab(bronze_dir: Path, silver_dir: Path) -> None:
     # ── Section 8: New Silver columns ─────────────────────────────────────────
     with st.expander("📋 New Columns Added by Silver Cleaning"):
         bronze_cols = set(bronze_claims.columns) - {"ingestion_timestamp", "source_file"}
-        silver_meta = {"ingestion_timestamp", "source_file", "silver_timestamp"}
+        silver_meta = SILVER_META_COLS
         silver_data_cols = set(silver_claims.columns) - silver_meta
         new_cols = sorted(silver_data_cols - bronze_cols)
 

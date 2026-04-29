@@ -22,7 +22,9 @@ plotly>=5.20,<6.0              # charts (used by dev_dashboard only — not src/
 # ── Added per week (commented out until needed) ────────────────────────────────
 # Week 2: no new deps (pandas + matplotlib if charting needed)
 # Week 3: no new deps
-# Week 4: scikit-learn>=1.5  (feature engineering helpers)
+scikit-learn>=1.5,<2.0       # ML models, pipelines, preprocessing
+xgboost>=2.0,<3.0            # primary classification model
+shap>=0.45,<1.0              # model explainability
 # Week 5: scikit-learn>=1.5, xgboost>=2.0, shap>=0.45
 # Week 6: sentence-transformers>=3.0, faiss-cpu>=1.8
 # Week 7: fastapi>=0.111, uvicorn>=0.30, python-jose>=3.3, passlib>=1.7

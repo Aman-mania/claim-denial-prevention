@@ -18,10 +18,18 @@ from __future__ import annotations
 import pandas as pd
 import structlog
 
+from src.constants import (
+    SILVER_META_COLS,
+    COL_DIAG_MISSING, COL_PROC_MISSING, COL_AMOUNT_MISSING,
+    COL_PROC_NO_DIAG, COL_DIAG_NO_PROC,
+    CRITICAL_FIELDS,
+    SILVER_CLAIMS_FLAG_COLS,
+)
+
 logger = structlog.get_logger(__name__)
 
-# Columns added by ingestion/silver pipelines — excluded from analysis
-_META_COLS = frozenset({"ingestion_timestamp", "source_file", "silver_timestamp"})
+# Metadata columns — imported from src/constants.py
+_META_COLS = SILVER_META_COLS
 
 
 def _data_cols(df: pd.DataFrame) -> list[str]:
@@ -52,7 +60,7 @@ def compute_overview(
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
 
     # Complete = all three critical fields present
-    critical = ["diagnosis_code", "procedure_code", "billed_amount"]
+    critical = list(CRITICAL_FIELDS)
     complete_mask = df[critical].notna().all(axis=1)
     shell_mask    = df[critical].isna().all(axis=1)
 
@@ -301,7 +309,7 @@ def compute_cleaning_impact(
         return round(df[col].isnull().mean() * 100, 2)
 
     # Count flag columns only if they exist in silver
-    flag_cols = ["diagnosis_code_missing", "procedure_code_missing", "billed_amount_missing"]
+    flag_cols = [COL_DIAG_MISSING, COL_PROC_MISSING, COL_AMOUNT_MISSING]
 
     return {
         "bronze_rows":               len(b),
@@ -340,7 +348,7 @@ def compute_claim_completeness(silver_claims: pd.DataFrame) -> pd.DataFrame:
     if silver_claims.empty:
         return pd.DataFrame()
 
-    flag_cols = ["diagnosis_code_missing", "procedure_code_missing", "billed_amount_missing"]
+    flag_cols = [COL_DIAG_MISSING, COL_PROC_MISSING, COL_AMOUNT_MISSING]
     if not all(c in silver_claims.columns for c in flag_cols):
         return pd.DataFrame()
 
@@ -371,11 +379,11 @@ def compute_violation_summary(silver_claims: pd.DataFrame) -> pd.DataFrame:
 
     violations = []
     checks = [
-        ("proc_no_diag",          "Procedure w/o Diagnosis",     "High"),
-        ("diag_no_proc",          "Diagnosis w/o Procedure",     "Medium"),
-        ("billed_amount_missing", "Amount Missing",              "Medium"),
-        ("diagnosis_code_missing","Diagnosis Missing",           "High"),
-        ("procedure_code_missing","Procedure Missing",           "Medium"),
+        (COL_PROC_NO_DIAG,   "Procedure w/o Diagnosis",  "High"),
+        (COL_DIAG_NO_PROC,   "Diagnosis w/o Procedure",  "Medium"),
+        (COL_AMOUNT_MISSING, "Amount Missing",            "Medium"),
+        (COL_DIAG_MISSING,   "Diagnosis Missing",         "High"),
+        (COL_PROC_MISSING,   "Procedure Missing",         "Medium"),
     ]
     for col, label, severity in checks:
         if col in silver_claims.columns:
@@ -400,9 +408,7 @@ def compute_provider_risk_summary(
     if silver_claims.empty or silver_providers.empty:
         return pd.DataFrame()
 
-    violation_cols = [c for c in ["proc_no_diag", "diag_no_proc", "billed_amount_missing",
-                                   "diagnosis_code_missing", "procedure_code_missing"]
-                      if c in silver_claims.columns]
+    violation_cols = [c for c in SILVER_CLAIMS_FLAG_COLS if c in silver_claims.columns]
     if not violation_cols:
         return pd.DataFrame()
 
