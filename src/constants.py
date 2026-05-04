@@ -14,11 +14,8 @@ delete the inline definition from those files.
 """
 
 # ── Sentinel values ────────────────────────────────────────────────────────────
-# Used in: src/silver/clean.py (to fill), src/silver/clean.py (flag logic),
-#           dev_dashboard/components/charts.py (display fallback)
 
 # Replaces null string codes in Silver — never use the string directly.
-# If this changes, clean.py fill AND flag conditions update automatically.
 SENTINEL_MISSING = "MISSING"
 
 # Replaces null location in providers Silver layer.
@@ -26,14 +23,6 @@ SENTINEL_UNKNOWN = "Unknown"
 
 
 # ── Pipeline metadata columns ─────────────────────────────────────────────────
-# Columns added by the pipeline itself — excluded from all data quality checks,
-# null profiles, cardinality counts, and analytics aggregations.
-#
-# Used in: src/ingestion/profiler.py, src/analytics/aggregations.py,
-#          src/silver/clean.py, dev_dashboard/tabs/clean_data.py
-#
-# Bronze adds: ingestion_timestamp, source_file
-# Silver adds: silver_timestamp (in addition to Bronze columns)
 
 BRONZE_META_COLS: frozenset[str] = frozenset({
     "ingestion_timestamp",
@@ -41,17 +30,10 @@ BRONZE_META_COLS: frozenset[str] = frozenset({
 })
 
 # Silver includes all Bronze metadata plus its own timestamp.
-# Use this when working with Silver DataFrames.
 SILVER_META_COLS: frozenset[str] = BRONZE_META_COLS | {"silver_timestamp"}
 
 
 # ── Silver flag column names ───────────────────────────────────────────────────
-# Boolean flag columns added by Silver cleaning.
-# Used in: src/silver/clean.py, src/silver/schema.py,
-#          src/analytics/aggregations.py, dev_dashboard/tabs/clean_data.py
-#
-# Naming rule: <source_column>_missing for null-fill flags,
-#              descriptive name for business logic flags.
 
 # Missing-value flags (True = original value was null before sentinel fill)
 COL_DIAG_MISSING   = "diagnosis_code_missing"
@@ -80,8 +62,17 @@ CRITICAL_FIELDS: tuple[str, ...] = (
 )
 
 
-# ── Dashboard ──────────────────────────────────────────────────────────────────
-# Used in: dev_dashboard/tabs/raw_data.py, dev_dashboard/tabs/clean_data.py
+# ── Gold feature columns ───────────────────────────────────────────────────────
+# These are model-ready columns derived in Gold while preserving original raw
+# business fields for auditability and future cloud replay/debugging.
 
-# How long Streamlit caches loaded Parquet data before re-reading from disk.
+COL_AMOUNT_IMPUTED = "billed_amount_imputed"
+COL_AMOUNT_IMPUTATION_STRATEGY = "amount_imputation_strategy"
+COL_COST_MATCH_LEVEL = "cost_match_level"
+COL_COST_MATCH_ENCODED = "cost_match_encoded"
+COL_LABEL_SOURCE = "label_source"
+
+
+# ── Dashboard ──────────────────────────────────────────────────────────────────
+
 DASHBOARD_CACHE_TTL: int = 300  # seconds

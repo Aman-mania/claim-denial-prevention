@@ -3,25 +3,18 @@ Silver Layer — Cleaning Pipeline
 ===================================
 Transforms Bronze Parquet → clean, trusted Silver Parquet.
 
-Silver contract (never violate)
----------------------------------
-1. NO rows dropped — problem rows are FLAGGED with boolean columns.
-2. NO cost imputation — billed_amount nulls stay null.
-3. Row count in Silver <= Bronze (only strict duplicates on ID are removed).
-4. Every cleaning step is a pure function (df in → df out, no side effects).
-5. Flag columns (e.g. diagnosis_code_missing) carry forward into Gold features.
+Silver contract
+---------------
+1. NO rows dropped except strict ID duplicates.
+2. NO overwrite of original billed_amount nulls in Silver.
+   Gold creates model-ready imputed amount features while preserving this raw field.
+3. Every cleaning step is a pure function.
+4. Missing/violation flag columns carry forward into Gold features.
 
-Missing value strategy (per column)
---------------------------------------
-  diagnosis_code  → fill null with "MISSING", add diagnosis_code_missing flag
-  procedure_code  → fill null with "MISSING", add procedure_code_missing flag
-  billed_amount   → keep null (NEVER impute cost), add billed_amount_missing flag
-  date            → parse to datetime; unparseable rows get NaT
-  location        → fill null with "Unknown", add location_missing flag
-
-Business logic flags added in Silver (set on sentinel-filled data):
-  proc_no_diag    → procedure present but diagnosis absent (billing without justification)
-  diag_no_proc    → diagnosis present but procedure absent (condition documented, nothing billed)
+Replacement-data support
+------------------------
+The new claims file includes a real denial_flag. Silver validates and carries it
+forward; Gold decides whether to use this real label or synthesize one for legacy data.
 """
 
 from __future__ import annotations
@@ -42,27 +35,14 @@ from src.constants import (
 )
 
 logger = structlog.get_logger(__name__)
-
-# Pipeline metadata cols — imported from src/constants.py
 _META_COLS = SILVER_META_COLS
 
 
 class SilverCleaningPipeline:
-    """
-    Reads Bronze Parquet → applies per-dataset cleaning → writes Silver Parquet.
-
-    Parameters
-    ----------
-    bronze_dir : Root of Bronze Parquet subdirectories.
-    silver_dir : Root of Silver Parquet subdirectories (created if absent).
-    """
-
     def __init__(self, bronze_dir: Path, silver_dir: Path) -> None:
         self.bronze_dir = Path(bronze_dir)
         self.silver_dir = Path(silver_dir)
         self._run_ts   = datetime.now(timezone.utc).isoformat()
-
-    # ── File I/O ──────────────────────────────────────────────────────────────
 
     def _load_bronze(self, dataset_name: str) -> pd.DataFrame:
         path = self.bronze_dir / dataset_name / f"{dataset_name}_bronze.parquet"
@@ -82,88 +62,68 @@ class SilverCleaningPipeline:
         logger.info("silver_written", dataset=dataset_name, rows=len(df), path=str(out_path))
         return out_path
 
-    # ── Per-dataset cleaning — pure functions ─────────────────────────────────
-
     def _clean_claims(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Claims cleaning steps:
-          1. Parse date string → datetime (NaT where unparseable)
-          2. Strip + uppercase code columns
-          3. Nullify negative billed_amount (invalid)
-          4. Add boolean missing-value flags for 3 critical fields
-          5. Remove strict claim_id duplicates (keep first)
-          6. Add business logic violation flags (proc_no_diag, diag_no_proc)
-          7. Attach silver_timestamp
-        """
         df = df.copy()
 
-        # 1. Parse date
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
 
-        # 2. Standardise code columns: strip whitespace, uppercase
         for col in ["diagnosis_code", "procedure_code"]:
-            df[col] = df[col].str.strip().str.upper()
+            df[col] = df[col].astype("string").str.strip().str.upper()
 
-        # 3. Negative billed_amount → null (business rule: cost can't be negative)
+        df["billed_amount"] = pd.to_numeric(df["billed_amount"], errors="coerce")
+
+        # Preserve real labels from the replacement dataset, but surface bad values
+        # as validation warnings instead of dropping rows in Silver.
+        if "denial_flag" in df.columns:
+            df["denial_flag"] = pd.to_numeric(df["denial_flag"], errors="coerce")
+            invalid_label = df["denial_flag"].notna() & ~df["denial_flag"].isin([0, 1])
+            if invalid_label.any():
+                logger.warning("invalid_denial_flag_values", count=int(invalid_label.sum()))
+            if df["denial_flag"].notna().all() and not invalid_label.any():
+                df["denial_flag"] = df["denial_flag"].astype(int)
+
         invalid_amount = df["billed_amount"].notna() & (df["billed_amount"] < 0)
-        if invalid_amount.sum() > 0:
+        if invalid_amount.any():
             logger.warning("negative_billed_amount_nullified", count=int(invalid_amount.sum()))
             df.loc[invalid_amount, "billed_amount"] = None
 
-        # 4. Flags captured BEFORE sentinel fill — flags reflect original raw nulls
-        df[COL_DIAG_MISSING] = df["diagnosis_code"].isnull()
-        df[COL_PROC_MISSING] = df["procedure_code"].isnull()
-        df[COL_AMOUNT_MISSING]  = df["billed_amount"].isnull()
+        # Flags reflect original post-normalization/nullification state.
+        df[COL_DIAG_MISSING]   = df["diagnosis_code"].isnull()
+        df[COL_PROC_MISSING]   = df["procedure_code"].isnull()
+        df[COL_AMOUNT_MISSING] = df["billed_amount"].isnull()
 
-        # 5. Sentinel fill for string code columns
-        #    "MISSING" replaces null codes so downstream code never gets null strings.
-        #    The flag columns above are the source of truth for ML features.
-        #    billed_amount is intentionally NOT filled — never impute financial data.
-        df["diagnosis_code"] = df["diagnosis_code"].fillna(SENTINEL_MISSING)
-        df["procedure_code"] = df["procedure_code"].fillna(SENTINEL_MISSING)
+        df["diagnosis_code"] = df["diagnosis_code"].fillna(SENTINEL_MISSING).astype(str)
+        df["procedure_code"] = df["procedure_code"].fillna(SENTINEL_MISSING).astype(str)
 
-        # 7. Dedup by claim_id — keep first occurrence
         dupe_mask = df.duplicated(subset=["claim_id"], keep="first")
-        if dupe_mask.sum() > 0:
+        if dupe_mask.any():
             logger.warning("duplicate_claim_ids_removed", count=int(dupe_mask.sum()))
         df = df[~dupe_mask].reset_index(drop=True)
 
-        # 8. Business logic violation flags
-        #    Set AFTER sentinel fill so "MISSING" codes are treated as absent.
-        #    proc_no_diag: procedure billed without a diagnosis code — primary denial trigger
-        #    diag_no_proc: diagnosis documented but no procedure billed — incomplete claim
-        df[COL_PROC_NO_DIAG] = (df["procedure_code"] != SENTINEL_MISSING) & (df["diagnosis_code"] == SENTINEL_MISSING)
-        df[COL_DIAG_NO_PROC] = (df["diagnosis_code"] != SENTINEL_MISSING) & (df["procedure_code"] == SENTINEL_MISSING)
+        df[COL_PROC_NO_DIAG] = (
+            (df["procedure_code"] != SENTINEL_MISSING)
+            & (df["diagnosis_code"] == SENTINEL_MISSING)
+        )
+        df[COL_DIAG_NO_PROC] = (
+            (df["diagnosis_code"] != SENTINEL_MISSING)
+            & (df["procedure_code"] == SENTINEL_MISSING)
+        )
 
-        # 9. Silver metadata
         df["silver_timestamp"] = self._run_ts
-
         return df
 
     def _clean_providers(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Providers cleaning steps:
-          1. Strip whitespace from all text columns
-          2. Title-case specialty and location
-          3. Add location_missing flag
-          4. Deduplicate by provider_id
-        """
         df = df.copy()
-
-        # Strip whitespace
         for col in ["doctor_name", "specialty", "location"]:
             if col in df.columns:
-                df[col] = df[col].str.strip()
+                df[col] = df[col].astype("string").str.strip()
 
-        # Title-case location and specialty for consistency
-        df["specialty"] = df["specialty"].str.title()
-        # Flag missing location BEFORE fill, then sentinel fill
+        df["specialty"] = df["specialty"].str.title().astype(str)
         df[COL_LOC_MISSING] = df["location"].isnull()
-        df["location"] = df["location"].fillna(SENTINEL_UNKNOWN).str.title()
+        df["location"] = df["location"].fillna(SENTINEL_UNKNOWN).str.title().astype(str)
 
-        # Deduplicate by provider_id
         dupe_mask = df.duplicated(subset=["provider_id"], keep="first")
-        if dupe_mask.sum() > 0:
+        if dupe_mask.any():
             logger.warning("duplicate_provider_ids_removed", count=int(dupe_mask.sum()))
         df = df[~dupe_mask].reset_index(drop=True)
 
@@ -171,53 +131,28 @@ class SilverCleaningPipeline:
         return df
 
     def _clean_diagnosis(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Diagnosis cleaning:
-          1. Uppercase diagnosis_code
-          2. Title-case category and severity
-        Reference table is already clean — minimal transformation needed.
-        """
         df = df.copy()
-        df["diagnosis_code"] = df["diagnosis_code"].str.strip().str.upper()
-        df["category"]       = df["category"].str.strip().str.title()
-        df["severity"]       = df["severity"].str.strip().str.title()
+        df["diagnosis_code"] = df["diagnosis_code"].astype("string").str.strip().str.upper().astype(str)
+        df["category"]       = df["category"].astype("string").str.strip().str.title().astype(str)
+        df["severity"]       = df["severity"].astype("string").str.strip().str.title().astype(str)
         df["silver_timestamp"] = self._run_ts
         return df
 
     def _clean_cost(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Cost cleaning:
-          1. Uppercase procedure_code, title-case region
-          2. Ensure numeric types for cost columns
-          3. Add cost_ratio = average_cost / expected_cost (useful for Gold features)
-        """
         df = df.copy()
-        df["procedure_code"] = df["procedure_code"].str.strip().str.upper()
-        df["region"]         = df["region"].str.strip().str.title()
-
-        # Ensure float types (safe coercion)
-        df["average_cost"]  = pd.to_numeric(df["average_cost"],  errors="coerce").astype("float64")
-        df["expected_cost"] = pd.to_numeric(df["expected_cost"], errors="coerce").astype("float64")
-
-        # Cost ratio: how does actual average compare to expected?
-        df["cost_ratio"] = (df["average_cost"] / df["expected_cost"]).round(4)
-
+        df["procedure_code"] = df["procedure_code"].astype("string").str.strip().str.upper().astype(str)
+        df["region"]         = df["region"].astype("string").str.strip().str.title().astype(str)
+        df["average_cost"]   = pd.to_numeric(df["average_cost"],  errors="coerce").astype("float64")
+        df["expected_cost"]  = pd.to_numeric(df["expected_cost"], errors="coerce").astype("float64")
+        df["cost_ratio"]     = (df["average_cost"] / df["expected_cost"]).round(4)
         df["silver_timestamp"] = self._run_ts
         return df
 
-    # ── Schema validation (soft — warns, never rejects) ────────────────────────
-
     def _validate(self, df: pd.DataFrame, dataset_name: str) -> dict:
-        """
-        Validate cleaned DataFrame against Silver schema.
-        Soft: logs warnings but never raises. Bronze already has the raw data.
-        Strips pipeline metadata before validating.
-        """
         schema = SILVER_SCHEMA_REGISTRY.get(dataset_name)
         if schema is None:
             return {"status": "skipped", "errors": None}
 
-        # Exclude metadata and silver_timestamp columns from schema check
         skip = _META_COLS | {"date"}
         validate_cols = [c for c in df.columns if c not in skip]
         df_check = df[validate_cols]
@@ -239,9 +174,6 @@ class SilverCleaningPipeline:
             logger.error("silver_validation_unexpected", dataset=dataset_name, error=str(exc))
             return {"status": "error", "errors": str(exc)}
 
-    # ── Orchestration ──────────────────────────────────────────────────────────
-
-    # Maps dataset name → cleaning function
     _CLEANERS: dict = {
         "claims":    "_clean_claims",
         "providers": "_clean_providers",
@@ -250,18 +182,6 @@ class SilverCleaningPipeline:
     }
 
     def run(self, datasets: list[str] | None = None) -> dict:
-        """
-        Run the Silver cleaning pipeline for one or all datasets.
-
-        Parameters
-        ----------
-        datasets : Subset to process. None = all known datasets.
-
-        Returns
-        -------
-        dict with run_timestamp and per-dataset results including
-        bronze_rows, silver_rows, rows_removed, validation status.
-        """
         targets = datasets or list(self._CLEANERS.keys())
         report: dict = {"run_timestamp": self._run_ts, "datasets": {}}
 
@@ -277,10 +197,8 @@ class SilverCleaningPipeline:
             try:
                 df_bronze   = self._load_bronze(name)
                 bronze_rows = len(df_bronze)
-
                 df_silver   = cleaner(df_bronze)
                 silver_rows = len(df_silver)
-
                 validation  = self._validate(df_silver, name)
                 out_path    = self._write_silver(df_silver, name)
 
@@ -292,18 +210,9 @@ class SilverCleaningPipeline:
                     "output_path":  str(out_path),
                     "validation":   validation,
                 }
-                logger.info(
-                    "silver_cleaning_complete",
-                    dataset=name,
-                    bronze_rows=bronze_rows,
-                    silver_rows=silver_rows,
-                    rows_removed=bronze_rows - silver_rows,
-                )
-
             except FileNotFoundError as exc:
                 logger.error("silver_cleaning_failed", dataset=name, error=str(exc))
                 report["datasets"][name] = {"status": "failed", "error": str(exc)}
-
             except Exception as exc:
                 logger.exception("silver_cleaning_unexpected_error", dataset=name, error=str(exc))
                 report["datasets"][name] = {"status": "failed", "error": str(exc)}

@@ -1,63 +1,47 @@
 """
 Bronze Layer — Pandera Schemas
 ================================
-Defines expected structure for all four raw datasets.
+Defines expected structure for all raw datasets.
 
-Design intent
--------------
-- Bronze schemas validate STRUCTURE only (columns, types, nullable flags).
-- Value constraint checks are intentionally minimal — Bronze preserves raw messiness.
-- Unique / referential integrity checks belong in Silver (Week 3).
-- Adding a new dataset = add one schema + one entry in DATASET_REGISTRY (ingest.py).
-
-Extending in later weeks
-------------------------
-- Silver schemas will import these and apply stricter transformations.
-- Gold schemas will validate engineered feature columns built on top of Silver.
+Bronze schemas validate STRUCTURE only. Value constraints stay minimal because
+Bronze preserves raw messiness for later Silver/Gold stages.
 """
 
 import pandera as pa
 from pandera import Column, DataFrameSchema, Check
 
 
-# ── Claims ────────────────────────────────────────────────────────────────────
-# Main operational table. Three critical fields have high null rates (known).
-# billed_amount >= 0 when present — negative billing is always wrong.
-
 CLAIMS_SCHEMA = DataFrameSchema(
     columns={
         "claim_id":       Column(str,   nullable=False),
         "patient_id":     Column(str,   nullable=False),
         "provider_id":    Column(str,   nullable=False),
-        "diagnosis_code": Column(str,   nullable=True),   # 30.7% null in source
-        "procedure_code": Column(str,   nullable=True),   # 24.1% null in source
-        "billed_amount":  Column(float, nullable=True,    # 34.3% null in source
+        "diagnosis_code": Column(str,   nullable=True),
+        "procedure_code": Column(str,   nullable=True),
+        "billed_amount":  Column(float, nullable=True,
                                  checks=Check.ge(0, error="billed_amount must be >= 0")),
-        "date":           Column(str,   nullable=False),  # kept as str; parsed in Silver
+        "date":           Column(str,   nullable=False),
+        # New replacement dataset includes this real label. It is optional so
+        # the legacy synthetic-label path still works with old/raw test data.
+        "denial_flag":    Column(int,   nullable=False, required=False,
+                                 checks=Check.isin([0, 1], error="denial_flag must be 0 or 1")),
     },
     name="claims_bronze",
     description="Raw claims data — immutable Bronze copy",
 )
 
 
-# ── Providers ─────────────────────────────────────────────────────────────────
-# Reference table for provider metadata.
-# location is nullable (4/21 providers missing it in source data).
-
 PROVIDERS_SCHEMA = DataFrameSchema(
     columns={
         "provider_id":  Column(str, nullable=False),
         "doctor_name":  Column(str, nullable=False),
         "specialty":    Column(str, nullable=False),
-        "location":     Column(str, nullable=True),  # 19% null in source
+        "location":     Column(str, nullable=True),
     },
     name="providers_bronze",
     description="Raw provider reference data — immutable Bronze copy",
 )
 
-
-# ── Diagnosis ─────────────────────────────────────────────────────────────────
-# Small reference table. severity must be High or Low — no other values in source.
 
 DIAGNOSIS_SCHEMA = DataFrameSchema(
     columns={
@@ -67,8 +51,8 @@ DIAGNOSIS_SCHEMA = DataFrameSchema(
             str,
             nullable=False,
             checks=Check.isin(
-                ["High", "Low"],
-                error="severity must be 'High' or 'Low'",
+                ["High", "Medium", "Low"],
+                error="severity must be 'High', 'Medium', or 'Low'",
             ),
         ),
     },
@@ -76,10 +60,6 @@ DIAGNOSIS_SCHEMA = DataFrameSchema(
     description="Raw diagnosis reference data — immutable Bronze copy",
 )
 
-
-# ── Cost ──────────────────────────────────────────────────────────────────────
-# Regional cost benchmarks. All numeric values are integers in source (no nulls).
-# Note: region is procedure-scoped, not claim-scoped — join logic lives in Silver.
 
 COST_SCHEMA = DataFrameSchema(
     columns={
@@ -94,10 +74,6 @@ COST_SCHEMA = DataFrameSchema(
     description="Raw regional cost benchmark data — immutable Bronze copy",
 )
 
-
-# ── Registry ──────────────────────────────────────────────────────────────────
-# Single source of truth mapping dataset name → its schema.
-# Used by both the ingestion pipeline and tests.
 
 SCHEMA_REGISTRY: dict[str, DataFrameSchema] = {
     "claims":    CLAIMS_SCHEMA,
