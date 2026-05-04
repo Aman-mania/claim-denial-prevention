@@ -383,6 +383,105 @@ class GoldFeaturePipeline:
         logger.info("features_built", rows=len(df))
         return df
 
+    def build_inference_artifacts(self, features: pd.DataFrame, cost: pd.DataFrame, diagnosis: pd.DataFrame) -> dict:
+        """
+        Build deterministic lookup artifacts for custom claim inference.
+
+        These are local JSON equivalents of what should later live in a
+        Databricks Feature Store / Unity Catalog setup: provider history,
+        patient frequency, diagnosis severity mappings, cost benchmarks, and
+        imputation statistics. Keeping them versioned beside the model reduces
+        training-serving skew in the local phase.
+        """
+        cost_regional, cost_procedure = self._prepare_cost_tables(cost)
+
+        amount = pd.to_numeric(features.get("billed_amount"), errors="coerce")
+        global_median = amount.median()
+        if pd.isna(global_median):
+            global_median = 0.0
+
+        procedure_amount_medians = (
+            features.assign(_amount=amount)
+            .dropna(subset=["_amount"])
+            .groupby("procedure_code")["_amount"]
+            .median()
+            .round(6)
+            .to_dict()
+        )
+
+        provider_cols = [
+            "provider_id", "specialty", "location",
+            "provider_claim_count", "provider_avg_billed", "provider_violation_rate",
+        ]
+        provider_history = (
+            features[[c for c in provider_cols if c in features.columns]]
+            .drop_duplicates(subset=["provider_id"], keep="first")
+            .set_index("provider_id")
+            .to_dict(orient="index")
+        )
+
+        patient_claim_counts = (
+            features.groupby("patient_id")["claim_id"].count().astype(int).to_dict()
+            if "patient_id" in features.columns else {}
+        )
+
+        diagnosis_lookup = (
+            diagnosis.assign(
+                diagnosis_code=diagnosis["diagnosis_code"].astype("string").str.strip().str.upper(),
+                severity=diagnosis["severity"].astype("string").str.strip().str.title(),
+            )
+            .assign(severity_rank=lambda d: d["severity"].map(SEVERITY_RANK_MAP).fillna(0).astype(int))
+            .set_index("diagnosis_code")[["category", "severity", "severity_rank"]]
+            .to_dict(orient="index")
+        )
+
+        regional_cost_lookup = {}
+        for _, row in cost_regional.iterrows():
+            key = f"{row['procedure_code']}|{row['cost_region']}"
+            regional_cost_lookup[key] = {
+                "expected_cost": None if pd.isna(row["regional_expected_cost"]) else float(row["regional_expected_cost"]),
+                "average_cost": None if pd.isna(row["regional_average_cost"]) else float(row["regional_average_cost"]),
+                "cost_ratio": None if pd.isna(row["regional_cost_ratio"]) else float(row["regional_cost_ratio"]),
+            }
+
+        procedure_cost_lookup = {}
+        for _, row in cost_procedure.iterrows():
+            procedure_cost_lookup[str(row["procedure_code"])] = {
+                "expected_cost": None if pd.isna(row["procedure_expected_cost"]) else float(row["procedure_expected_cost"]),
+                "average_cost": None if pd.isna(row["procedure_average_cost"]) else float(row["procedure_average_cost"]),
+                "cost_ratio": None if pd.isna(row["procedure_cost_ratio"]) else float(row["procedure_cost_ratio"]),
+            }
+
+        expected_cost_p75 = features["expected_cost"].quantile(0.75) if "expected_cost" in features.columns else np.nan
+        if pd.isna(expected_cost_p75):
+            expected_cost_p75 = 0.0
+
+        return {
+            "artifact_version": 1,
+            "created_at": self._run_ts,
+            "feature_table_rows": int(len(features)),
+            "amount_imputation": {
+                "global_median": float(global_median),
+                "procedure_medians": {str(k): float(v) for k, v in procedure_amount_medians.items()},
+            },
+            "cost": {
+                "expected_cost_p75": float(expected_cost_p75),
+                "regional_lookup": regional_cost_lookup,
+                "procedure_lookup": procedure_cost_lookup,
+                "match_encoding": {"missing": 0, "procedure_avg": 1, "regional": 2},
+            },
+            "provider_history": provider_history,
+            "patient_claim_counts": {str(k): int(v) for k, v in patient_claim_counts.items()},
+            "diagnosis_lookup": diagnosis_lookup,
+            "severity_rank_map": SEVERITY_RANK_MAP,
+            "specialty_map": {
+                "Neurology": 1,
+                "Cardiology": 2,
+                "Orthopedic": 3,
+                "General": 4,
+            },
+        }
+
     def build_feature_manifest(self) -> list[dict]:
         return [
             {"name": COL_DIAG_MISSING, "type": "bool", "group": "missing_flag", "ml_use": True,
@@ -459,6 +558,12 @@ class GoldFeaturePipeline:
                 json.dump(manifest, f, indent=2)
             logger.info("feature_manifest_written", path=str(manifest_path))
 
+            inference_artifacts = self.build_inference_artifacts(features, cost=cost, diagnosis=diagnosis)
+            inference_artifacts_path = self.gold_dir / "inference_artifacts.json"
+            with open(inference_artifacts_path, "w") as f:
+                json.dump(inference_artifacts, f, indent=2)
+            logger.info("inference_artifacts_written", path=str(inference_artifacts_path))
+
             report.update({
                 "status":          "success",
                 "base_rows":       len(base),
@@ -470,6 +575,7 @@ class GoldFeaturePipeline:
                 "base_path":       str(base_path),
                 "feature_path":    str(feat_path),
                 "manifest_path":   str(manifest_path),
+                "inference_artifacts_path": str(inference_artifacts_path),
             })
 
         except Exception as exc:
