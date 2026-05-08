@@ -1,1 +1,1 @@
-"""Inference helpers for custom-claim scoring."""
+"""Inference utilities for custom claim scoring."""
