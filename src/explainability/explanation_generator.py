@@ -23,6 +23,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import math
+
 import pandas as pd
 import structlog
 
@@ -37,9 +39,92 @@ from src.explainability.schemas import (
     SUMMARY_COLUMNS,
 )
 from src.io.table_store import LocalTableStore, TableStore
-from src.observability import ErrorCode, ErrorTracker
+from src.observability import ClaimDenialError, ErrorCode, ErrorTracker
 
 logger = structlog.get_logger(__name__)
+
+
+def _serialize_feature_value(value: Any) -> str | None:
+    """Return a Parquet-safe text representation of a raw feature value.
+
+    Explanation rows intentionally store values from many source features in a
+    single column. Some features are booleans, some are floats, some are strings.
+    PyArrow/Parquet requires one physical type per column, so we serialize this
+    mixed-value evidence field as text while keeping SHAP/risk fields numeric.
+    """
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+
+    if isinstance(value, (bool, int, float, str)):
+        if isinstance(value, float) and math.isnan(value):
+            return None
+        return str(value)
+
+    try:
+        return json.dumps(value, default=str, sort_keys=True)
+    except TypeError:
+        return str(value)
+
+
+def _coerce_explanation_long_schema(df: pd.DataFrame) -> pd.DataFrame:
+    """Coerce explanation output to stable Parquet-compatible column types."""
+    if df.empty:
+        return pd.DataFrame(columns=EXPLANATION_COLUMNS)
+
+    out = df.copy()
+    text_cols = [
+        "claim_id", "risk_level", "reason_code", "reason_title", "reason_text",
+        "business_category", "evidence_type", "feature_name", "feature_label",
+        "feature_value", "shap_direction", "shap_output_unit", "fix_suggestion",
+        "policy_query", "policy_tags", "model_used", "explanation_version", "created_at",
+    ]
+    float_cols = ["risk_score", "classification_threshold", "review_threshold", "shap_value"]
+    int_cols = ["predicted_denial", "reason_rank"]
+
+    for col in text_cols:
+        if col in out.columns:
+            out[col] = out[col].map(_serialize_feature_value).astype("string")
+    for col in float_cols:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce").astype("float64")
+    for col in int_cols:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce").astype("Int64")
+
+    return out[EXPLANATION_COLUMNS]
+
+
+def _coerce_explanation_summary_schema(df: pd.DataFrame) -> pd.DataFrame:
+    """Coerce summary output to stable Parquet-compatible column types."""
+    if df.empty:
+        return pd.DataFrame(columns=SUMMARY_COLUMNS)
+
+    out = df.copy()
+    text_cols = [
+        "claim_id", "risk_level", "reason_1", "reason_2", "reason_3",
+        "reason_codes", "reason_texts_json", "fix_suggestions_json",
+        "policy_queries_json", "policy_tags_json", "model_used",
+        "explanation_version", "created_at",
+    ]
+    float_cols = ["risk_score", "classification_threshold", "review_threshold"]
+    int_cols = ["predicted_denial"]
+
+    for col in text_cols:
+        if col in out.columns:
+            out[col] = out[col].map(_serialize_feature_value).astype("string")
+    for col in float_cols:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce").astype("float64")
+    for col in int_cols:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce").astype("Int64")
+
+    return out[SUMMARY_COLUMNS]
 
 
 class ExplanationGenerationPipeline:
@@ -153,6 +238,7 @@ class ExplanationGenerationPipeline:
             }
             if isinstance(row.get("policy_tags"), list):
                 row["policy_tags"] = json.dumps(row["policy_tags"])
+            row["feature_value"] = _serialize_feature_value(row.get("feature_value"))
             rows.append(row)
         return rows
 
@@ -205,22 +291,22 @@ class ExplanationGenerationPipeline:
         for col in EXPLANATION_COLUMNS:
             if col not in long_df.columns:
                 long_df[col] = None
-        return long_df[EXPLANATION_COLUMNS]
+        return _coerce_explanation_long_schema(long_df)
 
     def _write_outputs(self, long_df: pd.DataFrame, summary_df: pd.DataFrame) -> tuple[Path | str, Path | str]:
         try:
+            long_df = _coerce_explanation_long_schema(long_df)
+            summary_df = _coerce_explanation_summary_schema(summary_df)
             long_path = self.table_store.write_table(EXPLANATION_TABLE, long_df)
             summary_path = self.table_store.write_table(EXPLANATION_SUMMARY_TABLE, summary_df)
             return long_path, summary_path
         except Exception as exc:
-            self.error_tracker.record_exception(
-                exc,
+            raise ClaimDenialError(
+                ErrorCode.XAI_EXPLANATION_WRITE_FAILED,
+                str(exc),
                 component="xai",
-                stage="write_explanation_outputs",
-                fallback_code=ErrorCode.XAI_EXPLANATION_WRITE_FAILED,
                 metadata={"stage": "write_explanation_outputs"},
-            )
-            raise
+            ) from exc
 
     def run(
         self,
@@ -283,7 +369,7 @@ class ExplanationGenerationPipeline:
                     failed_claims.append({"claim_id": claim_id, "error": str(exc), "error_code": event.error_code})
 
             long_df = self._normalize_long_df(long_rows)
-            summary_df = self._build_summary(long_df)
+            summary_df = _coerce_explanation_summary_schema(self._build_summary(long_df))
             long_path, summary_path = self._write_outputs(long_df, summary_df)
 
             if failed_claims:
@@ -321,12 +407,19 @@ class ExplanationGenerationPipeline:
             logger.info("explanation_generation_complete", **report)
         except Exception as exc:
             logger.exception("explanation_generation_failed", error=str(exc))
+            err_stage = "run_explain"
+            fallback_code = ErrorCode.XAI_UNEXPECTED
+            metadata = {"stage": "run_explain"}
+            if isinstance(exc, ClaimDenialError):
+                err_stage = str(exc.metadata.get("stage", err_stage))
+                metadata = {**exc.metadata, "stage": err_stage}
+                fallback_code = exc.code
             event = self.error_tracker.record_exception(
                 exc,
                 component="xai",
-                stage="run_explain",
-                fallback_code=ErrorCode.XAI_UNEXPECTED,
-                metadata={"stage": "run_explain"},
+                stage=err_stage,
+                fallback_code=fallback_code,
+                metadata=metadata,
             )
             report.update({
                 "status": "failed",

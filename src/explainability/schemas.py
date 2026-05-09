@@ -24,7 +24,7 @@ EXPLANATION_COLUMNS: list[str] = [
     "evidence_type",          # critical_rule | shap | fallback
     "feature_name",
     "feature_label",
-    "feature_value",
+    "feature_value",          # stored as string: source feature values can be bool/float/text
     "shap_value",
     "shap_direction",
     "shap_output_unit",
