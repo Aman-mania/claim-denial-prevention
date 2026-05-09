@@ -1,13 +1,10 @@
 """
 Dev Dashboard — Entry Point
 ==============================
-Development-only Streamlit dashboard for inspecting Bronze and Silver data.
+Development-only Streamlit dashboard for inspecting pipeline outputs.
 
 NOT production UI. Run from project root:
     streamlit run dev_dashboard/app.py
-
-Requires both ingestion (run_ingestion.py) and optionally silver
-(run_silver.py) to have been run first.
 """
 
 import sys
@@ -24,17 +21,15 @@ from src.config import setup_logging
 from tabs.raw_data import render_raw_tab
 from tabs.clean_data import render_clean_tab
 from tabs.ml_analysis import render_ml_tab
+from tabs.explainability import render_explainability_tab
 
-# Configure logging (silent for the dashboard — logs go to terminal)
 setup_logging(level="WARNING")
 
-# ── Paths ──────────────────────────────────────────────────────────────────────
 BRONZE_DIR = _ROOT / "data" / "bronze"
 SILVER_DIR = _ROOT / "data" / "silver"
 GOLD_DIR   = _ROOT / "data" / "gold"
 MODELS_DIR = _ROOT / "models"
 
-# ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Claim Denial Prevention — Dev Dashboard",
     page_icon="🏥",
@@ -42,85 +37,92 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ── Header ─────────────────────────────────────────────────────────────────────
 st.title("🏥 Claim Denial Prevention — Dev Dashboard")
 st.caption("Internal tool · Data exploration · Not for end users")
 
-# ── Sidebar: pipeline controls ─────────────────────────────────────────────────
 with st.sidebar:
     st.header("Pipeline Controls")
     st.caption("Run pipelines and refresh dashboard data.")
 
-    if st.button("🔄 Re-run Ingestion", use_container_width=True):
+    def _run_script(script_name: str):
         import subprocess
-        result = subprocess.run(
-            [sys.executable, str(_ROOT / "run_ingestion.py")],
-            capture_output=True, text=True, cwd=str(_ROOT),
+        return subprocess.run(
+            [sys.executable, str(_ROOT / script_name)],
+            capture_output=True,
+            text=True,
+            cwd=str(_ROOT),
         )
+
+    if st.button("🔄 Re-run Ingestion", use_container_width=True):
+        result = _run_script("run_ingestion.py")
         if result.returncode == 0:
             st.success("Ingestion complete. Refresh the page.")
             st.cache_data.clear()
         else:
-            st.error(f"Ingestion failed:\n{result.stderr[:500]}")
+            st.error(f"Ingestion failed:\n{(result.stderr or result.stdout)[:800]}")
+
+    if st.button("🧹 Re-run Silver Cleaning", use_container_width=True):
+        result = _run_script("run_silver.py")
+        if result.returncode == 0:
+            st.success("Silver pipeline complete. Refresh the page.")
+            st.cache_data.clear()
+        else:
+            st.error(f"Silver pipeline failed:\n{(result.stderr or result.stdout)[:800]}")
 
     if st.button("⚙️ Re-run Gold Pipeline", use_container_width=True):
-        import subprocess
-        result = subprocess.run(
-            [sys.executable, str(_ROOT / "run_gold.py")],
-            capture_output=True, text=True, cwd=str(_ROOT),
-        )
+        result = _run_script("run_gold.py")
         if result.returncode == 0:
             st.success("Gold pipeline complete. Refresh the page.")
             st.cache_data.clear()
         else:
-            st.error(f"Gold failed:\n{result.stderr[:500]}")
+            st.error(f"Gold failed:\n{(result.stderr or result.stdout)[:800]}")
 
     if st.button("🤖 Re-run Model Training", use_container_width=True):
-        import subprocess
-        result = subprocess.run(
-            [sys.executable, str(_ROOT / "run_train.py")],
-            capture_output=True, text=True, cwd=str(_ROOT),
-        )
+        result = _run_script("run_train.py")
         if result.returncode == 0:
             st.success("Training complete. Refresh the page.")
             st.cache_data.clear()
             st.cache_resource.clear()
         else:
-            st.error(f"Training failed:\n{result.stderr[:500]}")
+            st.error(f"Training failed:\n{(result.stderr or result.stdout)[:800]}")
 
-    if st.button("🧹 Re-run Silver Cleaning", use_container_width=True):
-        import subprocess
-        result = subprocess.run(
-            [sys.executable, str(_ROOT / "run_silver.py")],
-            capture_output=True, text=True, cwd=str(_ROOT),
-        )
+    if st.button("🧠 Re-run Week 5 Explanations", use_container_width=True):
+        result = _run_script("run_explain.py")
         if result.returncode == 0:
-            st.success("Silver pipeline complete. Refresh the page.")
+            st.success("Explanations complete. Refresh the page.")
             st.cache_data.clear()
+            st.cache_resource.clear()
         else:
-            st.error(f"Silver pipeline failed:\n{result.stderr[:500]}")
+            st.error(f"Explainability failed:\n{(result.stderr or result.stdout)[:800]}")
 
     st.divider()
     st.caption("Data locations:")
-    st.code(f"Bronze: data/bronze/\nSilver: data/silver/", language="text")
+    st.code(
+        "Bronze: data/bronze/\n"
+        "Silver: data/silver/\n"
+        "Gold: data/gold/\n"
+        "Models: models/",
+        language="text",
+    )
 
-    # Check data status
     st.divider()
     st.markdown("**Data Status**")
     bronze_ok = (BRONZE_DIR / "claims" / "claims_bronze.parquet").exists()
-    silver_ok  = (SILVER_DIR / "claims" / "claims_silver.parquet").exists()
-    gold_ok   = (GOLD_DIR   / "gold_claim_features.parquet").exists()
+    silver_ok = (SILVER_DIR / "claims" / "claims_silver.parquet").exists()
+    gold_ok = (GOLD_DIR / "gold_claim_features.parquet").exists()
     models_ok = (MODELS_DIR / "training_report.json").exists()
+    explain_ok = (GOLD_DIR / "gold_claim_explanation_summary.parquet").exists()
     st.markdown(f"{'✅' if bronze_ok else '❌'} Bronze layer")
-    st.markdown(f"{'✅' if silver_ok  else '⚠️'} Silver layer")
-    st.markdown(f"{'✅' if gold_ok   else '⚠️'} Gold layer")
+    st.markdown(f"{'✅' if silver_ok else '⚠️'} Silver layer")
+    st.markdown(f"{'✅' if gold_ok else '⚠️'} Gold layer")
     st.markdown(f"{'✅' if models_ok else '⚠️'} ML models")
+    st.markdown(f"{'✅' if explain_ok else '⚠️'} Week 5 explanations")
 
-# ── Tabs ───────────────────────────────────────────────────────────────────────
-tab_raw, tab_clean, tab_ml = st.tabs([
+tab_raw, tab_clean, tab_ml, tab_xai = st.tabs([
     "📊 Raw Data (Bronze)",
     "✨ Clean Data (Silver)",
     "🤖 ML Model (Week 4)",
+    "🧠 Explainable AI (Week 5)",
 ])
 
 with tab_raw:
@@ -131,3 +133,6 @@ with tab_clean:
 
 with tab_ml:
     render_ml_tab(gold_dir=GOLD_DIR, models_dir=MODELS_DIR)
+
+with tab_xai:
+    render_explainability_tab(gold_dir=GOLD_DIR, models_dir=MODELS_DIR)

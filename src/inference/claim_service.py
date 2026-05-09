@@ -40,12 +40,13 @@ class ClaimDenialService:
     ) -> "ClaimDenialService":
         """Load feature builder + recommended predictor."""
         tracker = error_tracker or ErrorTracker()
+
         try:
-            from src.inference.feature_builder import ClaimFeatureBuilder
+            from src.inference.feature_builder import CustomClaimFeatureBuilder
         except Exception as exc:
             tracker.record(
                 ErrorCode.INFER_ARTIFACT_NOT_FOUND,
-                "Could not import ClaimFeatureBuilder. Apply the inference feature-builder patch first.",
+                "Could not import CustomClaimFeatureBuilder. Apply the inference feature-builder patch first.",
                 component="inference",
                 stage="service_load",
                 metadata={"stage": "service_load"},
@@ -67,7 +68,7 @@ class ClaimDenialService:
             raise
 
         try:
-            feature_builder = ClaimFeatureBuilder.load(gold_dir=gold_dir)
+            feature_builder = CustomClaimFeatureBuilder.load(gold_dir=gold_dir)
         except Exception as exc:
             tracker.record_exception(
                 exc,
@@ -147,10 +148,8 @@ class ClaimDenialService:
             self._validate_raw_claim(claim)
 
             try:
-                features = self.feature_builder.build_features(claim)
-            except AttributeError:
-                # Backward-compatible method name used in some prior patches.
-                features = self.feature_builder.build(claim)
+                build = getattr(self.feature_builder, "build_features", None) or getattr(self.feature_builder, "build")
+                features = build(claim)
             except Exception as exc:
                 event = self.error_tracker.record_exception(
                     exc,

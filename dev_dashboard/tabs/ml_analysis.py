@@ -1,62 +1,31 @@
 """
 Dashboard Tab 3 — ML Model Analysis
-======================================
-Four sections:
-  1. Model Performance  — metrics cards, ROC curve, confusion matrix
-  2. Feature Intelligence — SHAP importance, risk score distribution
-  3. Prediction Explorer — pick a real claim from Gold data, see live prediction
-  4. Custom Claim Builder — toggle flags/sliders, see risk update in real time
+====================================
+Shows Week 4 model performance, explainability, prediction explorer, and a
+raw-claim-based custom claim builder.
 
-All heavy objects (model, Gold data) are cached. The interactive sections
-call predict() and explain() on demand — no page reload needed.
+Important: the custom builder now calls ClaimDenialService. It no longer sends
+manual model-feature toggles directly to the predictor, which prevents
+inconsistent states such as billed_amount present + billed_amount_missing=True.
 """
 
 from __future__ import annotations
 
 import json
+import pickle
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
 import streamlit as st
+from sklearn.metrics import confusion_matrix, roc_curve, auc
 
-from src.ml.predict import ClaimPredictor
-from src.ml.explain import SHAPExplainer, FEATURE_LABELS, FIX_SUGGESTIONS
-from src.constants import DASHBOARD_CACHE_TTL
+from src.constants import DASHBOARD_CACHE_TTL, SENTINEL_MISSING
+from src.inference.claim_service import ClaimDenialService
+from src.ml.explain import SHAPExplainer, FEATURE_LABELS
 
-# ── Constants ─────────────────────────────────────────────────────────────────
 _RISK_COLORS = {"HIGH": "#EF4444", "MEDIUM": "#F59E0B", "LOW": "#10B981"}
-_SPECIALTY_MAP  = {"Neurology": 1, "Cardiology": 2, "Orthopedic": 3, "General": 4}
-_SEVERITY_MAP   = {"Missing (code unknown)": 0, "Low severity": 1, "High severity": 2}
-_SPECIALTY_INV  = {v: k for k, v in _SPECIALTY_MAP.items()}
-_SEVERITY_INV   = {v: k for k, v in _SEVERITY_MAP.items()}
-
-
-# ── Cached loaders ─────────────────────────────────────────────────────────────
-
-@st.cache_resource(show_spinner=False)
-def _load_predictor(models_dir: Path) -> ClaimPredictor | None:
-    try:
-        return ClaimPredictor.recommended(models_dir=models_dir)
-    except FileNotFoundError:
-        return None
-
-
-@st.cache_resource(show_spinner=False)
-def _load_explainer(models_dir: Path) -> SHAPExplainer | None:
-    try:
-        xgb_path = models_dir / "xgb_model.pkl"
-        return SHAPExplainer.from_model_file(xgb_path)
-    except FileNotFoundError:
-        return None
-
-
-@st.cache_data(ttl=DASHBOARD_CACHE_TTL, show_spinner=False)
-def _load_gold(gold_dir: Path) -> pd.DataFrame:
-    path = gold_dir / "gold_claim_features.parquet"
-    return pd.read_parquet(path) if path.exists() else pd.DataFrame()
 
 
 @st.cache_data(ttl=DASHBOARD_CACHE_TTL, show_spinner=False)
@@ -65,98 +34,138 @@ def _load_report(models_dir: Path) -> dict:
     return json.loads(path.read_text()) if path.exists() else {}
 
 
-# ── ROC curve (computed on Gold features) ────────────────────────────────────
+@st.cache_data(ttl=DASHBOARD_CACHE_TTL, show_spinner=False)
+def _load_gold(gold_dir: Path) -> pd.DataFrame:
+    path = gold_dir / "gold_claim_features.parquet"
+    return pd.read_parquet(path) if path.exists() else pd.DataFrame()
+
+
+@st.cache_resource(show_spinner=False)
+def _load_service(gold_dir: Path, models_dir: Path) -> ClaimDenialService | None:
+    try:
+        return ClaimDenialService.load(gold_dir=gold_dir, models_dir=models_dir)
+    except Exception:
+        return None
+
+
+@st.cache_resource(show_spinner=False)
+def _load_explainer(models_dir: Path) -> SHAPExplainer | None:
+    try:
+        return SHAPExplainer.from_model_file(models_dir / "xgb_model.pkl")
+    except Exception:
+        return None
+
+
+def _risk_policy(report: dict) -> dict:
+    return report.get("risk_band_policy", {
+        "medium_lower_inclusive": 0.40,
+        "classification_threshold": 0.65,
+        "high_lower_inclusive": 0.65,
+    })
+
+
+def _classification_threshold(report: dict) -> float:
+    return float(_risk_policy(report).get("classification_threshold", 0.65))
+
+
+def _metric_block(report: dict) -> dict:
+    return report.get("recommended_model_test_at_tuned_threshold", {})
+
+
+def _load_saved_model(models_dir: Path, fname: str):
+    with open(models_dir / fname, "rb") as f:
+        return pickle.load(f)
+
+
+def _prepare_X(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
+    X = df[features].copy()
+    bool_cols = X.select_dtypes(include="bool").columns
+    X[bool_cols] = X[bool_cols].astype(int)
+    return X
+
 
 @st.cache_data(ttl=DASHBOARD_CACHE_TTL, show_spinner=False)
-def _compute_roc(gold_dir: Path, models_dir: Path) -> tuple:
-    """Returns (fpr, tpr, auc_lr, auc_xgb) for both models."""
-    import pickle
-    from sklearn.metrics import roc_curve, auc
-
-    df   = _load_gold(gold_dir)
+def _compute_roc(gold_dir: Path, models_dir: Path) -> dict:
+    df = _load_gold(gold_dir)
     report = _load_report(models_dir)
     if df.empty or not report:
-        return None, None, None, None
+        return {}
 
-    features = report["features"]
-    X = df[features].copy()
-    X[X.select_dtypes(include="bool").columns] = \
-        X.select_dtypes(include="bool").astype(int)
+    features = report.get("features", [])
+    if not features:
+        return {}
+    X = _prepare_X(df, features)
     y = df["denial_flag"].values
 
     results = {}
     for name, fname in [("xgboost", "xgb_model.pkl"), ("logistic_regression", "lr_model.pkl")]:
         pkl = models_dir / fname
         if pkl.exists():
-            with open(pkl, "rb") as f:
-                saved = pickle.load(f)
+            saved = _load_saved_model(models_dir, fname)
             probs = saved["pipeline"].predict_proba(X)[:, 1]
             fpr, tpr, _ = roc_curve(y, probs)
             results[name] = (fpr, tpr, round(auc(fpr, tpr), 4))
-
     return results
 
 
 @st.cache_data(ttl=DASHBOARD_CACHE_TTL, show_spinner=False)
 def _compute_confusion(gold_dir: Path, models_dir: Path) -> dict:
-    """Returns confusion matrix values and prediction counts for both models."""
-    import pickle
-    from sklearn.metrics import confusion_matrix
-
-    df     = _load_gold(gold_dir)
+    df = _load_gold(gold_dir)
     report = _load_report(models_dir)
     if df.empty or not report:
         return {}
 
-    features = report["features"]
-    X = df[features].copy()
-    X[X.select_dtypes(include="bool").columns] = \
-        X.select_dtypes(include="bool").astype(int)
+    features = report.get("features", [])
+    if not features:
+        return {}
+
+    threshold = _classification_threshold(report)
+    X = _prepare_X(df, features)
     y = df["denial_flag"].values
 
     out = {}
     for name, fname in [("xgboost", "xgb_model.pkl"), ("logistic_regression", "lr_model.pkl")]:
         pkl = models_dir / fname
         if pkl.exists():
-            with open(pkl, "rb") as f:
-                saved = pickle.load(f)
-            preds = saved["pipeline"].predict(X)
-            cm    = confusion_matrix(y, preds)
+            saved = _load_saved_model(models_dir, fname)
+            probs = saved["pipeline"].predict_proba(X)[:, 1]
+            preds = (probs >= threshold).astype(int)
+            cm = confusion_matrix(y, preds, labels=[0, 1])
             out[name] = {
-                "tn": int(cm[0, 0]), "fp": int(cm[0, 1]),
-                "fn": int(cm[1, 0]), "tp": int(cm[1, 1]),
+                "tn": int(cm[0, 0]),
+                "fp": int(cm[0, 1]),
+                "fn": int(cm[1, 0]),
+                "tp": int(cm[1, 1]),
+                "threshold": threshold,
             }
     return out
 
 
-# ── Chart helpers ──────────────────────────────────────────────────────────────
-
 def _roc_chart(roc_results: dict) -> go.Figure:
     fig = go.Figure()
-    colors = {"xgboost": "#4F46E5", "logistic_regression": "#10B981"}
     labels = {"xgboost": "XGBoost", "logistic_regression": "Logistic Regression"}
 
     for name, (fpr, tpr, auc_val) in roc_results.items():
         fig.add_trace(go.Scatter(
-            x=fpr, y=tpr,
-            name=f"{labels[name]} (AUC={auc_val})",
-            line={"color": colors[name], "width": 2.5},
+            x=fpr,
+            y=tpr,
+            name=f"{labels.get(name, name)} (AUC={auc_val})",
             mode="lines",
         ))
 
-    # Diagonal reference line (random classifier)
     fig.add_trace(go.Scatter(
-        x=[0, 1], y=[0, 1],
+        x=[0, 1],
+        y=[0, 1],
         name="Random (AUC=0.50)",
-        line={"color": "#9CA3AF", "dash": "dash", "width": 1},
+        line={"dash": "dash"},
         mode="lines",
     ))
     fig.update_layout(
-        title="ROC Curve — both models on full dataset",
+        title="ROC Curve",
         xaxis_title="False Positive Rate",
         yaxis_title="True Positive Rate",
         template="plotly_white",
-        height=380,
+        height=360,
         legend={"orientation": "h", "y": -0.25},
         xaxis={"range": [0, 1]},
         yaxis={"range": [0, 1.02]},
@@ -166,29 +175,25 @@ def _roc_chart(roc_results: dict) -> go.Figure:
 
 def _confusion_chart(cm: dict, model_name: str) -> go.Figure:
     tn, fp, fn, tp = cm["tn"], cm["fp"], cm["fn"], cm["tp"]
-    total = tn + fp + fn + tp
-
-    z      = [[tn, fp], [fn, tp]]
-    labels = [["True Negative", "False Positive"], ["False Negative", "True Positive"]]
-    text   = [
+    total = max(tn + fp + fn + tp, 1)
+    z = [[tn, fp], [fn, tp]]
+    text = [
         [f"<b>{tn}</b><br>({tn/total*100:.1f}%)<br>Correctly approved",
-         f"<b>{fp}</b><br>({fp/total*100:.1f}%)<br>False alarm"],
+         f"<b>{fp}</b><br>({fp/total*100:.1f}%)<br>Manual review false alarm"],
         [f"<b>{fn}</b><br>({fn/total*100:.1f}%)<br>Missed denial ⚠",
          f"<b>{tp}</b><br>({tp/total*100:.1f}%)<br>Correctly flagged"],
     ]
-    colorscale = [[0, "#EFF6FF"], [0.5, "#93C5FD"], [1, "#1D4ED8"]]
 
     fig = go.Figure(go.Heatmap(
         z=z,
         text=text,
         texttemplate="%{text}",
-        colorscale=colorscale,
         showscale=False,
     ))
     fig.update_layout(
-        title=f"Confusion Matrix — {model_name.replace('_', ' ').title()} (full dataset, n={total})",
-        xaxis={"title": "Predicted", "tickvals": [0, 1], "ticktext": ["Approved", "Denied"]},
-        yaxis={"title": "Actual",    "tickvals": [0, 1], "ticktext": ["Approved", "Denied"]},
+        title=f"Confusion Matrix — {model_name.replace('_', ' ').title()} @ threshold {cm.get('threshold', 0.5):.2f}",
+        xaxis={"title": "Predicted", "tickvals": [0, 1], "ticktext": ["Approved/Low", "Denied/High"]},
+        yaxis={"title": "Actual", "tickvals": [0, 1], "ticktext": ["Approved", "Denied"]},
         template="plotly_white",
         height=320,
     )
@@ -196,94 +201,55 @@ def _confusion_chart(cm: dict, model_name: str) -> go.Figure:
 
 
 def _shap_chart(shap_importance: dict) -> go.Figure:
-    items  = list(shap_importance.items())
+    items = list(shap_importance.items())[:15]
     labels = [FEATURE_LABELS.get(k, k) for k, _ in items]
     values = [v for _, v in items]
-    max_v  = max(values) if values else 1
-
-    colors = ["#EF4444" if v > max_v * 0.5 else "#F59E0B" if v > max_v * 0.2 else "#6B7280"
-              for v in values]
 
     fig = go.Figure(go.Bar(
         x=values[::-1],
         y=labels[::-1],
         orientation="h",
-        marker_color=colors[::-1],
         text=[f"{v:.4f}" for v in values[::-1]],
         textposition="outside",
     ))
     fig.update_layout(
-        title="SHAP Feature Importance — mean |SHAP value| across test set",
-        xaxis_title="Mean |SHAP value| (contribution to prediction)",
+        title="SHAP Feature Importance — mean |raw log-odds contribution|",
+        xaxis_title="Mean |SHAP value|",
         template="plotly_white",
-        height=420,
+        height=430,
         margin={"l": 220, "r": 80, "t": 50, "b": 40},
         showlegend=False,
     )
     return fig
 
 
-def _risk_distribution_chart(df: pd.DataFrame) -> go.Figure:
-    """Stacked bar: Denied vs Approved broken down by risk level."""
-    if "denial_risk_score" not in df.columns:
+def _score_histogram(df: pd.DataFrame, report: dict) -> go.Figure:
+    if df.empty:
         return go.Figure()
 
-    probs = df["denial_risk_score"].values
-    df2 = df.copy()
-    df2["risk_level"] = pd.cut(
-        probs,
-        bins=[-0.001, 0.40, 0.65, 1.001],
-        labels=["LOW", "MEDIUM", "HIGH"],
-    ).astype(str)
-
-    counts = df2.groupby(["risk_level", "denial_flag"]).size().unstack(fill_value=0)
-
-    fig = go.Figure()
-    for flag, label, color in [(0, "Approved", "#10B981"), (1, "Denied", "#EF4444")]:
-        if flag in counts.columns:
-            fig.add_trace(go.Bar(
-                name=label,
-                x=["LOW", "MEDIUM", "HIGH"],
-                y=[counts.loc[lvl, flag] if lvl in counts.index else 0
-                   for lvl in ["LOW", "MEDIUM", "HIGH"]],
-                marker_color=color,
-            ))
-
-    fig.update_layout(
-        title="Risk Level Distribution — Denied vs Approved breakdown",
-        xaxis_title="Risk Level",
-        yaxis_title="Number of Claims",
-        barmode="stack",
-        template="plotly_white",
-        height=320,
-        legend={"orientation": "h", "y": -0.25},
-    )
-    return fig
-
-
-def _score_histogram(df: pd.DataFrame) -> go.Figure:
-    """Histogram of denial_risk_score coloured by actual label."""
-    if "denial_risk_score" not in df.columns:
-        return go.Figure()
+    # Prefer model probabilities only when saved as denial_risk_score for legacy data.
+    score_col = "denial_risk_score"
+    if score_col not in df.columns or df[score_col].isna().all():
+        return go.Figure().update_layout(
+            title="Risk score distribution unavailable until model probabilities are materialized",
+            template="plotly_white",
+            height=300,
+        )
 
     fig = go.Figure()
-    for flag, label, color in [(0, "Approved", "#10B981"), (1, "Denied", "#EF4444")]:
-        subset = df[df["denial_flag"] == flag]["denial_risk_score"]
-        fig.add_trace(go.Histogram(
-            x=subset,
-            name=label,
-            marker_color=color,
-            opacity=0.7,
-            nbinsx=30,
-        ))
+    for flag, label in [(0, "Approved"), (1, "Denied")]:
+        subset = df[df["denial_flag"] == flag][score_col].dropna()
+        fig.add_trace(go.Histogram(x=subset, name=label, opacity=0.7, nbinsx=30))
 
-    # Decision boundary
-    fig.add_vline(x=0.5, line_dash="dash", line_color="#1F2937",
-                  annotation_text="threshold 0.50", annotation_position="top right")
+    policy = _risk_policy(report)
+    fig.add_vline(x=policy.get("medium_lower_inclusive", 0.4), line_dash="dash",
+                  annotation_text="review threshold")
+    fig.add_vline(x=policy.get("classification_threshold", 0.65), line_dash="dash",
+                  annotation_text="denial threshold")
 
     fig.update_layout(
-        title="Denial Risk Score Distribution",
-        xaxis_title="Denial Risk Score",
+        title="Risk Score Distribution",
+        xaxis_title="Risk Score",
         yaxis_title="Claims",
         barmode="overlay",
         template="plotly_white",
@@ -293,97 +259,117 @@ def _score_histogram(df: pd.DataFrame) -> go.Figure:
     return fig
 
 
-# ── Prediction result renderer ─────────────────────────────────────────────────
+def _render_prediction_payload(prediction: dict, features: dict, explainer: SHAPExplainer | None) -> None:
+    color = _RISK_COLORS.get(prediction["risk_level"], "#6B7280")
 
-def _render_prediction_result(claim_features: dict, predictor: ClaimPredictor,
-                               explainer: SHAPExplainer | None) -> None:
-    result = predictor.predict(claim_features)
-    color  = _RISK_COLORS[result["risk_level"]]
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
+    c1.metric("Risk Score", f"{prediction['risk_score']:.0%}")
+    c2.metric("Risk Level", prediction["risk_level"])
+    c3.metric("Predicted Denial", "Yes" if prediction.get("predicted_denial") else "No")
+    c4.metric("Model Used", prediction["model_used"].replace("_", " ").title())
 
-    # Risk score card
-    c1, c2, c3 = st.columns([1, 1, 2])
-    c1.metric("Risk Score",  f"{result['risk_score']:.0%}")
-    c2.metric("Risk Level",  result["risk_level"])
-    c3.metric("Model Used",  result["model_used"].replace("_", " ").title())
-
-    # Colour-coded risk banner
     st.markdown(
         f"""<div style="background:{color}22; border-left:4px solid {color};
         padding:10px 16px; border-radius:4px; margin:8px 0;">
         <b style="color:{color}; font-size:16px;">
-        {'⛔ HIGH DENIAL RISK' if result['risk_level']=='HIGH'
-         else '⚠️ MEDIUM DENIAL RISK' if result['risk_level']=='MEDIUM'
+        {'⛔ HIGH DENIAL RISK' if prediction['risk_level']=='HIGH'
+         else '⚠️ MEDIUM REVIEW RISK' if prediction['risk_level']=='MEDIUM'
          else '✅ LOW DENIAL RISK'}</b><br>
-        <span style="color:#374151;">Score: {result['risk_score']:.4f}
-        (threshold: 0.50 for denial)</span></div>""",
+        <span style="color:#374151;">
+        Score: {prediction['risk_score']:.4f} ·
+        Review threshold: {prediction.get('review_threshold', 0):.4f} ·
+        Denial threshold: {prediction.get('classification_threshold', 0):.4f}
+        </span></div>""",
         unsafe_allow_html=True,
     )
 
-    # SHAP explanation
-    if explainer:
-        explanation = explainer.explain(claim_features, top_n=3)
-        st.markdown("**Top 3 Denial Reasons (SHAP)**")
-        for r in explanation["top_reasons"]:
-            icon  = "🔴" if r["direction"] == "increases_risk" else "🟢"
-            arrow = "↑ increases risk" if r["direction"] == "increases_risk" else "↓ decreases risk"
-            with st.expander(f"{icon}  {r['rank']}. {r['label']}  —  SHAP {r['shap_value']:+.4f}  ({arrow})"):
-                st.write(f"**Feature:** `{r['feature']}`")
-                st.write(f"**How to fix:** {r['fix']}")
-    else:
-        st.info("SHAP explainer not available — run `python run_train.py` to generate the XGBoost model.")
+    if features:
+        with st.expander("Show model-ready features generated for this claim"):
+            display = {
+                FEATURE_LABELS.get(k, k): str(v)
+                for k, v in features.items()
+                if k in {
+                    "diagnosis_code_missing", "procedure_code_missing", "billed_amount_missing",
+                    "proc_no_diag", "diag_no_proc", "billed_deviation_imputed_capped",
+                    "billed_amount_imputed", "log_billed_amount_imputed", "is_high_cost",
+                    "cost_match_encoded", "provider_claim_count", "provider_violation_rate",
+                    "patient_claim_count", "severity_rank", "specialty_encoded",
+                }
+            }
+            st.dataframe(pd.DataFrame(list(display.items()), columns=["Feature", "Value"]),
+                         use_container_width=True, hide_index=True)
+
+    if explainer and features:
+        explanation = explainer.explain(features, top_n=3)
+        st.markdown("**Top 3 Denial Reasons (SHAP raw log-odds contributions)**")
+        for reason in explanation["top_reasons"]:
+            icon = "🔴" if reason["direction"] == "increases_risk" else "🟢"
+            arrow = "↑ increases risk" if reason["direction"] == "increases_risk" else "↓ decreases risk"
+            with st.expander(
+                f"{icon} {reason['rank']}. {reason['label']} — SHAP {reason['shap_value']:+.4f} ({arrow})"
+            ):
+                st.write(f"**Feature:** `{reason['feature']}`")
+                st.write(f"**How to fix:** {reason['fix']}")
+                st.caption(explanation.get("note", "SHAP values are contributions, not probability percentages."))
+    elif not explainer:
+        st.info("SHAP explainer not available — run `python run_train.py` to generate/load the XGBoost model.")
 
 
-# ── Main render ────────────────────────────────────────────────────────────────
+def _render_model_ready_prediction(claim_features: dict, service: ClaimDenialService | None,
+                                   explainer: SHAPExplainer | None) -> None:
+    if service is None:
+        st.error("Inference service could not be loaded. Run `python run_gold.py` and `python run_train.py`.")
+        return
+    prediction = service.predictor.predict(claim_features)
+    _render_prediction_payload(prediction, claim_features, explainer)
+
+
+def _unique_sorted(df: pd.DataFrame, col: str, include_missing: bool = True) -> list[str]:
+    if df.empty or col not in df.columns:
+        return [SENTINEL_MISSING] if include_missing else []
+    vals = sorted(str(v) for v in df[col].dropna().unique() if str(v) != "")
+    if include_missing and SENTINEL_MISSING not in vals:
+        vals = [SENTINEL_MISSING] + vals
+    return vals
+
 
 def render_ml_tab(gold_dir: Path, models_dir: Path) -> None:
     st.header("ML Model — Performance, Explainability & Predictions")
 
-    # Guard: models not trained yet
     if not (models_dir / "training_report.json").exists():
         st.warning("Models not found. Train them first:", icon="⚠️")
         st.code("python run_gold.py\npython run_train.py", language="bash")
         return
 
-    with st.spinner("Loading model and data..."):
-        report    = _load_report(models_dir)
-        df        = _load_gold(gold_dir)
-        predictor = _load_predictor(models_dir)
+    with st.spinner("Loading model, reports, and data..."):
+        report = _load_report(models_dir)
+        df = _load_gold(gold_dir)
+        service = _load_service(gold_dir, models_dir)
         explainer = _load_explainer(models_dir)
-        roc_data  = _compute_roc(gold_dir, models_dir)
-        cm_data   = _compute_confusion(gold_dir, models_dir)
+        roc_data = _compute_roc(gold_dir, models_dir)
+        cm_data = _compute_confusion(gold_dir, models_dir)
 
-    if predictor is None:
-        st.error("Could not load model. Run `python run_train.py`.")
-        return
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # SECTION 1 — Model Performance
-    # ══════════════════════════════════════════════════════════════════════════
     st.subheader("1 — Model Performance")
 
-    # Key metrics row
-    xgb = report.get("xgboost", {})
-    lr  = report.get("logistic_regression", {})
-    rec = report.get("recommended_model", "xgboost")
-
+    tuned = _metric_block(report)
+    policy = _risk_policy(report)
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("XGB ROC-AUC",   f"{xgb.get('roc_auc', 0):.4f}", "recommended ✓" if rec == "xgboost" else "")
-    c2.metric("XGB Recall",    f"{xgb.get('recall', 0):.4f}",  "primary metric")
-    c3.metric("XGB Precision", f"{xgb.get('precision', 0):.4f}")
-    c4.metric("XGB F1",        f"{xgb.get('f1', 0):.4f}")
-    c5.metric("XGB Accuracy",  f"{xgb.get('accuracy', 0):.4f}")
+    c1.metric("Recommended", report.get("recommended_model", "—").replace("_", " ").title())
+    c2.metric("ROC-AUC", f"{tuned.get('roc_auc', 0):.4f}")
+    c3.metric("Recall", f"{tuned.get('recall', 0):.4f}", "primary")
+    c4.metric("Precision", f"{tuned.get('precision', 0):.4f}")
+    c5.metric("F1", f"{tuned.get('f1', 0):.4f}")
 
     st.caption(
-        "**Recall is the primary metric** — a missed denial (false negative) costs more "
-        "than a false alarm in a pre-submission validation system."
+        f"Thresholds are tuned, not hardcoded: review ≥ "
+        f"{policy.get('medium_lower_inclusive', 0):.4f}, denial ≥ "
+        f"{policy.get('classification_threshold', 0):.4f}."
     )
 
-    # ROC + Confusion matrix side by side
     c_left, c_right = st.columns(2)
     with c_left:
         if roc_data:
             st.plotly_chart(_roc_chart(roc_data), key="ml_roc", width="stretch")
-
     with c_right:
         model_choice = st.selectbox(
             "Confusion matrix for:",
@@ -394,175 +380,138 @@ def render_ml_tab(gold_dir: Path, models_dir: Path) -> None:
         if cm_data and model_choice in cm_data:
             st.plotly_chart(_confusion_chart(cm_data[model_choice], model_choice),
                             key="ml_cm", width="stretch")
-            cm = cm_data[model_choice]
-            st.caption(
-                f"**Missed denials (FN): {cm['fn']}** — claims that should be flagged but weren't. "
-                f"**False alarms (FP): {cm['fp']}** — clean claims incorrectly flagged."
-            )
 
     st.divider()
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # SECTION 2 — Feature Intelligence
-    # ══════════════════════════════════════════════════════════════════════════
     st.subheader("2 — Feature Intelligence")
-    st.caption("What the model actually learned — which features drive denial predictions.")
 
     c_left, c_right = st.columns([3, 2])
     with c_left:
         if report.get("shap_importance"):
-            st.plotly_chart(_shap_chart(report["shap_importance"]),
-                            key="ml_shap", width="stretch")
+            st.plotly_chart(_shap_chart(report["shap_importance"]), key="ml_shap", width="stretch")
     with c_right:
-        st.markdown("**Key insight from SHAP**")
-        st.markdown(
-            "- `diagnosis_code_missing` dominates — its absence is the single strongest denial predictor\n"
-            "- `proc_no_diag` is second — billing a procedure without clinical justification\n"
-            "- `severity_encoded` is third — the model discovered High-severity diagnoses with missing procedures are disproportionately risky. **The label didn't encode severity directly — this is genuine ML signal**\n"
-            "- Provider-level features (`violation_rate`, `claim_count`) contribute, confirming provider history is a useful signal"
-        )
+        cal = report.get("calibration", {})
+        st.markdown("**Calibration / probability quality**")
+        st.metric("Brier Score", f"{cal.get('brier_score', 0):.4f}")
+        st.metric("Expected Calibration Error", f"{cal.get('expected_calibration_error', 0):.4f}")
+        st.caption("Lower is better. Use this before trusting scores as real probabilities.")
 
-    c_left, c_right = st.columns(2)
-    with c_left:
-        if not df.empty:
-            st.plotly_chart(_score_histogram(df), key="ml_hist", width="stretch")
-    with c_right:
-        if not df.empty:
-            st.plotly_chart(_risk_distribution_chart(df), key="ml_dist", width="stretch")
+    if not df.empty:
+        st.plotly_chart(_score_histogram(df, report), key="ml_hist", width="stretch")
 
     st.divider()
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # SECTION 3 — Prediction Explorer (real claims from Gold data)
-    # ══════════════════════════════════════════════════════════════════════════
     st.subheader("3 — Prediction Explorer")
-    st.caption(
-        "Pick any real claim from the Gold dataset. The model predicts its denial risk "
-        "and explains the top 3 reasons. This confirms the model works on actual data."
-    )
+    st.caption("Pick a real Gold claim and score it using the currently recommended model + tuned threshold.")
 
     if df.empty:
         st.warning("Gold data not found. Run `python run_gold.py`.")
     else:
         features = report.get("features", [])
-
-        # Dropdown with denial flag shown so you can pick known-denied claims
         claim_options = {}
-        for _, row in df.iterrows():
+        for _, row in df.head(5000).iterrows():
             label = (
-                f"{row['claim_id']}  |  "
-                f"{'⛔ Denied' if row['denial_flag'] == 1 else '✅ Approved'}  |  "
-                f"diag={'✗' if row.get('diagnosis_code_missing') else '✓'}  "
-                f"proc={'✗' if row.get('procedure_code_missing') else '✓'}  "
-                f"proc_no_diag={'⚠' if row.get('proc_no_diag') else '–'}"
+                f"{row['claim_id']} | "
+                f"{'⛔ Denied' if row['denial_flag'] == 1 else '✅ Approved'} | "
+                f"diag={'✗' if row.get('diagnosis_code_missing') else '✓'} "
+                f"proc={'✗' if row.get('procedure_code_missing') else '✓'} "
+                f"amount={'✗' if row.get('billed_amount_missing') else '✓'}"
             )
             claim_options[label] = row.to_dict()
 
-        selected_label = st.selectbox(
-            "Select a claim:",
-            list(claim_options.keys()),
-            key="claim_explorer_select",
-        )
+        selected_label = st.selectbox("Select a claim:", list(claim_options.keys()), key="claim_explorer_select")
         selected_claim = claim_options[selected_label]
 
-        # Show raw feature values
-        with st.expander("Show claim feature values"):
-            display = {
-                FEATURE_LABELS.get(k, k): str(v)  # str() prevents Arrow bool/int type clash
-                for k, v in selected_claim.items()
-                if k in features
-            }
-            feat_df = pd.DataFrame(list(display.items()), columns=["Feature", "Value"])
-            st.dataframe(feat_df, use_container_width=True, hide_index=True)
-
-        # Actual label vs prediction
         actual = "⛔ Denied" if selected_claim.get("denial_flag") == 1 else "✅ Approved"
-        st.markdown(f"**Actual label (synthetic):** {actual}")
-        st.markdown("**Model prediction:**")
+        st.markdown(f"**Actual label:** {actual}")
+        _render_model_ready_prediction(selected_claim, service, explainer)
 
-        _render_prediction_result(selected_claim, predictor, explainer)
+        with st.expander("Show selected Gold feature values"):
+            display = {
+                FEATURE_LABELS.get(k, k): str(selected_claim.get(k))
+                for k in features
+            }
+            st.dataframe(pd.DataFrame(list(display.items()), columns=["Feature", "Value"]),
+                         use_container_width=True, hide_index=True)
 
     st.divider()
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # SECTION 4 — Custom Claim Builder
-    # ══════════════════════════════════════════════════════════════════════════
     st.subheader("4 — Custom Claim Builder")
     st.caption(
-        "Build any hypothetical claim by toggling flags and adjusting values. "
-        "See how each change affects the risk score instantly."
+        "Build a raw hypothetical claim. Derived flags, amount imputation, cost match, "
+        "provider history, and risk features are computed automatically."
     )
 
+    if service is None:
+        st.error("Inference service unavailable. Run `python run_gold.py` and `python run_train.py`.")
+        return
+
+    provider_ids = _unique_sorted(df, "provider_id", include_missing=False) or ["UNKNOWN_PROVIDER"]
+    diagnosis_codes = _unique_sorted(df, "diagnosis_code", include_missing=True)
+    procedure_codes = _unique_sorted(df, "procedure_code", include_missing=True)
+    specialties = _unique_sorted(df, "specialty", include_missing=False) or ["Unknown"]
+    locations = _unique_sorted(df, "location", include_missing=False) or ["Unknown"]
+
     with st.form("custom_claim_form"):
-        st.markdown("**Structural Flags** — what's missing from the claim")
-        fc1, fc2, fc3 = st.columns(3)
-        diag_missing  = fc1.checkbox("diagnosis_code missing",  value=False, key="cb_diag")
-        proc_missing  = fc2.checkbox("procedure_code missing",  value=False, key="cb_proc")
-        amt_missing   = fc3.checkbox("billed_amount missing",   value=False, key="cb_amt")
+        c1, c2, c3 = st.columns(3)
+        claim_id = c1.text_input("Claim ID", value="CUSTOM")
+        patient_id = c2.text_input("Patient ID", value="CUSTOM_PATIENT")
+        provider_id = c3.selectbox("Provider ID", provider_ids)
 
-        st.markdown("**Business Logic Flags**")
-        fb1, fb2 = st.columns(2)
-        proc_no_diag = fb1.checkbox("proc_no_diag  (procedure without diagnosis)",
-                                     value=False, key="cb_pnd")
-        diag_no_proc = fb2.checkbox("diag_no_proc  (diagnosis without procedure)",
-                                     value=False, key="cb_dnp")
+        c1, c2, c3 = st.columns(3)
+        diagnosis_code = c1.selectbox("Diagnosis Code", diagnosis_codes, index=1 if len(diagnosis_codes) > 1 else 0)
+        procedure_code = c2.selectbox("Procedure Code", procedure_codes, index=1 if len(procedure_codes) > 1 else 0)
+        amount_missing = c3.checkbox("Billed amount missing", value=False)
 
-        st.markdown("**Numeric Features**")
-        fn1, fn2 = st.columns(2)
-        billed_raw = fn1.number_input(
-            "Billed amount (₹)", min_value=0, max_value=100000,
-            value=22000, step=1000, key="ni_billed",
-        )
-        deviation = fn2.slider(
-            "Billing deviation from expected (%)",
-            min_value=-100, max_value=500, value=150, step=10, key="sl_dev",
-        )
-        fp1, fp2, fp3 = st.columns(3)
-        prov_count   = fp1.slider("Provider claim count",    34, 63, 48, key="sl_pcc")
-        prov_rate    = fp2.slider("Provider violation rate", 0.95, 1.62, 1.28,
-                                   step=0.05, key="sl_pvr")
-        pat_count    = fp3.slider("Patient claim count",     1, 8, 2, key="sl_pc")
+        billed_amount = None
+        if not amount_missing:
+            billed_amount = st.number_input(
+                "Billed amount",
+                min_value=0.0,
+                max_value=100000.0,
+                value=10000.0,
+                step=500.0,
+            )
+        else:
+            st.info("Amount will be treated as missing. Gold inference will impute it using procedure/global median.")
 
-        st.markdown("**Categorical**")
-        fc1, fc2, fc3 = st.columns(3)
-        severity_label  = fc1.selectbox("Diagnosis severity",
-                                         list(_SEVERITY_MAP.keys()), index=1, key="sel_sev")
-        specialty_label = fc2.selectbox("Provider specialty",
-                                         list(_SPECIALTY_MAP.keys()), index=0, key="sel_spec")
-        is_high_cost    = fc3.checkbox("High-cost claim", value=False, key="cb_hc")
+        c1, c2 = st.columns(2)
+        specialty = c1.selectbox("Provider Specialty override", ["Use provider history"] + specialties)
+        location = c2.selectbox("Provider Location override", ["Use provider history"] + locations)
 
-        submitted = st.form_submit_button("🔍  Predict Denial Risk", use_container_width=True)
+        submitted = st.form_submit_button("🔍 Predict Denial Risk", use_container_width=True)
 
     if submitted:
-        custom_claim = {
-            "claim_id":                "CUSTOM",
-            "diagnosis_code_missing":  int(diag_missing),
-            "procedure_code_missing":  int(proc_missing),
-            "billed_amount_missing":   int(amt_missing),
-            "proc_no_diag":            int(proc_no_diag),
-            "diag_no_proc":            int(diag_no_proc),
-            "billed_deviation_capped": float(min(deviation, 500)),
-            "log_billed_amount":       float(np.log1p(billed_raw)) if billed_raw > 0 else 0.0,
-            "is_high_cost":            int(is_high_cost),
-            "provider_claim_count":    float(prov_count),
-            "provider_violation_rate": float(prov_rate),
-            "patient_claim_count":     float(pat_count),
-            "severity_encoded":        float(_SEVERITY_MAP[severity_label]),
-            "specialty_encoded":       float(_SPECIALTY_MAP[specialty_label]),
+        raw_claim = {
+            "claim_id": claim_id,
+            "patient_id": patient_id,
+            "provider_id": provider_id,
+            "diagnosis_code": None if diagnosis_code == SENTINEL_MISSING else diagnosis_code,
+            "procedure_code": None if procedure_code == SENTINEL_MISSING else procedure_code,
+            "billed_amount": None if amount_missing else billed_amount,
         }
+        if specialty != "Use provider history":
+            raw_claim["specialty"] = specialty
+        if location != "Use provider history":
+            raw_claim["location"] = location
+
+        result = service.score_claim(raw_claim)
         st.markdown("---")
         st.markdown("**Prediction for custom claim:**")
-        _render_prediction_result(custom_claim, predictor, explainer)
+        if result["status"] == "success":
+            _render_prediction_payload(result["prediction"], result["features"], explainer)
+        else:
+            err = result["error"]
+            st.error(
+                f"{err['error_code']}: {err['message']} "
+                f"(occurrence_count={err['occurrence_count']}, repeated={err['is_repeated']})"
+            )
 
-    # Training data summary at the bottom
     with st.expander("Training details"):
+        split = report.get("split_policy", {})
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Train rows",   report.get("train_rows", 0))
-        c2.metric("Test rows",    report.get("test_rows", 0))
-        c3.metric("Features",     report.get("feature_count", 0))
-        c4.metric("Target",       report.get("target", "—"))
+        c1.metric("Train rows", split.get("train_rows", 0))
+        c2.metric("Validation rows", split.get("validation_rows", 0))
+        c3.metric("Test rows", split.get("test_rows", 0))
+        c4.metric("Features", report.get("feature_count", 0))
         st.caption(
             f"Recommended model: **{report.get('recommended_model', '—').upper()}** · "
-            f"Train denied: {report.get('train_rows', 0) - report.get('test_rows', 0)} · "
-            "Split: 70/30 stratified"
+            "Threshold tuned on validation set; final metrics reported on held-out test set."
         )

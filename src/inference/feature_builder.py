@@ -127,7 +127,7 @@ class CustomClaimFeatureBuilder:
         """
         Build one feature dict from custom claim input.
 
-        Input can contain raw claim fields:
+        Input should contain raw claim fields:
         claim_id, patient_id, provider_id, diagnosis_code, procedure_code,
         billed_amount, specialty, location.
         """
@@ -196,8 +196,15 @@ class CustomClaimFeatureBuilder:
             "specialty_encoded": int(self.specialty_map.get(specialty, 0) or 0),
         }
 
-        # Keep the model feature contract stable even when a source artifact is missing.
         for name in _REQUIRED_FEATURES:
             features.setdefault(name, None)
 
         return features
+
+    def build_features(self, claim: dict[str, Any]) -> dict[str, Any]:
+        """Backward/forward-compatible method name used by services and APIs."""
+        return self.build(claim)
+
+
+# Backward-compatible alias. Some earlier patches imported ClaimFeatureBuilder.
+ClaimFeatureBuilder = CustomClaimFeatureBuilder
