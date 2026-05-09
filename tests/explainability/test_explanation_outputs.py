@@ -1,15 +1,14 @@
 import pandas as pd
+import pytest
 
 from src.explainability.explanation_generator import ExplanationGenerationPipeline
 from src.explainability.schemas import EXPLANATION_COLUMNS, SUMMARY_COLUMNS
 
+pytestmark = [pytest.mark.unit, pytest.mark.week5]
+
 
 def test_build_summary_from_long_rows(tmp_path):
-    pipeline = ExplanationGenerationPipeline(
-        gold_dir=tmp_path,
-        models_dir=tmp_path,
-        output_dir=tmp_path,
-    )
+    pipeline = ExplanationGenerationPipeline(gold_dir=tmp_path, models_dir=tmp_path, output_dir=tmp_path)
     long_df = pd.DataFrame(
         [
             {
@@ -61,3 +60,4 @@ def test_explanation_schema_columns_are_stable():
     assert "reason_code" in EXPLANATION_COLUMNS
     assert "policy_query" in EXPLANATION_COLUMNS
     assert "shap_output_unit" in EXPLANATION_COLUMNS
+    assert "evidence_type" in EXPLANATION_COLUMNS

@@ -1,8 +1,10 @@
 """
 Business reason catalog for claim-denial explainability.
 
-This file bridges raw ML features and user-facing reasoning. It also prepares
-Week 6 RAG by attaching policy-search queries and tags to each reason code.
+The catalog is the bridge between raw ML features and user-facing reasoning.
+It is intentionally deterministic: the system does not need GenAI to decide why
+something is risky. SHAP identifies influential features; this catalog maps
+those features to reusable business explanations and Week 6 policy queries.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ class ReasonDefinition:
     policy_query_template: str
     policy_tags: tuple[str, ...]
     severity: str = "review"
+    critical_rule: bool = False
 
 
 REASON_CATALOG: dict[str, ReasonDefinition] = {
@@ -38,6 +41,7 @@ REASON_CATALOG: dict[str, ReasonDefinition] = {
         ),
         policy_tags=("diagnosis", "medical_necessity", "claim_completeness"),
         severity="high",
+        critical_rule=True,
     ),
     "MISSING_PROCEDURE": ReasonDefinition(
         reason_code="MISSING_PROCEDURE",
@@ -49,6 +53,7 @@ REASON_CATALOG: dict[str, ReasonDefinition] = {
         policy_query_template="Procedure code is required to identify the service billed on a claim.",
         policy_tags=("procedure", "coding", "claim_completeness"),
         severity="high",
+        critical_rule=True,
     ),
     "MISSING_AMOUNT": ReasonDefinition(
         reason_code="MISSING_AMOUNT",
@@ -60,6 +65,7 @@ REASON_CATALOG: dict[str, ReasonDefinition] = {
         policy_query_template="Billed amount charge information is required for payer claim adjudication.",
         policy_tags=("billing", "amount", "claim_completeness"),
         severity="high",
+        critical_rule=True,
     ),
     "PROCEDURE_WITHOUT_DIAGNOSIS": ReasonDefinition(
         reason_code="PROCEDURE_WITHOUT_DIAGNOSIS",
@@ -74,6 +80,7 @@ REASON_CATALOG: dict[str, ReasonDefinition] = {
         ),
         policy_tags=("diagnosis", "procedure", "medical_necessity"),
         severity="high",
+        critical_rule=True,
     ),
     "DIAGNOSIS_WITHOUT_PROCEDURE": ReasonDefinition(
         reason_code="DIAGNOSIS_WITHOUT_PROCEDURE",
@@ -85,6 +92,7 @@ REASON_CATALOG: dict[str, ReasonDefinition] = {
         policy_query_template="Claim line requires procedure/service information when billing for a diagnosis-related encounter.",
         policy_tags=("diagnosis", "procedure", "claim_completeness"),
         severity="medium",
+        critical_rule=True,
     ),
     "HIGH_BILLING_AMOUNT": ReasonDefinition(
         reason_code="HIGH_BILLING_AMOUNT",
@@ -179,6 +187,13 @@ FEATURE_TO_REASON: dict[str, str] = {
     for reason_code, definition in REASON_CATALOG.items()
     for feature in definition.source_features
 }
+
+CRITICAL_FEATURES: tuple[str, ...] = tuple(
+    feature
+    for definition in REASON_CATALOG.values()
+    if definition.critical_rule
+    for feature in definition.source_features
+)
 
 
 def get_reason_for_feature(feature_name: str) -> ReasonDefinition | None:

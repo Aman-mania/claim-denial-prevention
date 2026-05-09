@@ -2,7 +2,7 @@
 """
 Week 5 — Explainable AI Entry Point
 ===================================
-Gold features + trained model + SHAP → business reasons table.
+Gold features + trained XGBoost model + SHAP → business reasons table.
 
 Usage:
     python run_explain.py
@@ -18,6 +18,7 @@ from pathlib import Path
 
 from src.config import setup_logging
 from src.explainability import ExplanationGenerationPipeline
+from src.observability import summarize_error_events, tracker_from_env
 
 BASE_DIR = Path(__file__).parent
 GOLD_DIR = BASE_DIR / "data" / "gold"
@@ -36,6 +37,7 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
     setup_logging(level="INFO")
+    tracker = tracker_from_env()
 
     print()
     print("╔══════════════════════════════════════════════════════════════╗")
@@ -48,34 +50,34 @@ def main() -> int:
         output_dir=GOLD_DIR,
         max_reasons=args.max_reasons,
         shap_top_n=args.shap_top_n,
+        error_tracker=tracker,
+        model_name="xgboost",
     )
     report = pipeline.run(limit=args.limit, claim_ids=args.claim_ids)
 
+    obs = summarize_error_events([])
     try:
-        from src.observability.pipeline_integration import (
-            record_pipeline_report,
-            summarize_error_events,
-            tracker_from_env,
-        )
-        tracker = tracker_from_env()
-        events = record_pipeline_report(report, component="ml", tracker=tracker, stage="run_explain")
-        obs = summarize_error_events(events)
-        if obs["errors_recorded"]:
-            print(f"\n  Observability: recorded {obs['errors_recorded']} issue(s): {', '.join(obs['codes'])}")
+        repeated = tracker.get_repeated_errors(min_count=2)
+        obs["repeated_errors"] = len(repeated)
     except Exception:
         pass
 
-    if report.get("status") != "success":
+    if report.get("status") not in {"success", "success_with_warnings"}:
         print(f"\n  ERROR: {report.get('error')}")
+        if report.get("error_code"):
+            print(f"  Error code: {report.get('error_code')}")
         print("╔══════════════════════════════════════════════════════════════╗")
         print("║   ✗  Explainability generation failed.                     ║")
         print("╚══════════════════════════════════════════════════════════════╝")
         return 1
 
-    print(f"\n  Claims input:       {report['claims_input']:,}")
+    print(f"\n  Status:             {report['status']}")
+    print(f"  Claims input:       {report['claims_input']:,}")
     print(f"  Claims explained:   {report['claims_explained']:,}")
     print(f"  Reason rows:        {report['reason_rows']:,}")
     print(f"  Failed claims:      {report['failed_claim_count']:,}")
+    if obs.get("repeated_errors"):
+        print(f"  Repeated errors:    {obs['repeated_errors']:,}  (see logs/error_summary.json)")
 
     print("\n  Risk-level counts:")
     for level, count in report.get("risk_level_counts", {}).items():
@@ -85,6 +87,11 @@ def main() -> int:
     for reason, count in report.get("top_reason_counts", {}).items():
         print(f"    {reason:<35} {count}")
 
+    if report.get("unmapped_features"):
+        print("\n  Unmapped SHAP features seen:")
+        for feature, count in sorted(report["unmapped_features"].items(), key=lambda x: -x[1])[:10]:
+            print(f"    {feature:<35} {count}")
+
     print("\n  Saved artifacts:")
     print(f"    Explanations: {report['explanations_path']}")
     print(f"    Summary:      {report['summary_path']}")
@@ -92,7 +99,10 @@ def main() -> int:
 
     print()
     print("╔══════════════════════════════════════════════════════════════╗")
-    print("║   ✓  Week 5 explanations complete. Ready for Week 6 RAG.   ║")
+    if report["status"] == "success_with_warnings":
+        print("║   ⚠  Week 5 completed with warnings. Check error logs.      ║")
+    else:
+        print("║   ✓  Week 5 explanations complete. Ready for Week 6 RAG.   ║")
     print("╚══════════════════════════════════════════════════════════════╝")
     print()
     return 0
