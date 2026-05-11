@@ -1,0 +1,22 @@
+{
+  "status": "success",
+  "bootstrapped_sample_policy": false,
+  "raw_dir": "/Users/aman.biswakarma/Desktop/Shadow_project_Aman/claim-denial-prevention/data/policies/raw",
+  "processed_dir": "/Users/aman.biswakarma/Desktop/Shadow_project_Aman/claim-denial-prevention/data/policies/processed",
+  "vector_dir": "/Users/aman.biswakarma/Desktop/Shadow_project_Aman/claim-denial-prevention/data/vector_store",
+  "documents_loaded": 5,
+  "chunks_created": 50,
+  "requested_embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+  "requested_embedding_backend": "sentence-transformers",
+  "fallback_backend": "tfidf",
+  "embedding_backend": "sentence-transformers",
+  "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+  "embedding_dim": 384,
+  "vector_backend": "faiss",
+  "faiss_index_written": true,
+  "chunk_table_path": "/Users/aman.biswakarma/Desktop/Shadow_project_Aman/claim-denial-prevention/data/policies/processed/policy_chunks.parquet",
+  "index_path": "/Users/aman.biswakarma/Desktop/Shadow_project_Aman/claim-denial-prevention/data/vector_store/policy.faiss",
+  "metadata_path": "/Users/aman.biswakarma/Desktop/Shadow_project_Aman/claim-denial-prevention/data/vector_store/policy_metadata.json",
+  "vector_matrix_path": "/Users/aman.biswakarma/Desktop/Shadow_project_Aman/claim-denial-prevention/data/vector_store/policy_vectors.npy",
+  "row_count": 50
+}

@@ -1,0 +1,11 @@
+{
+  "registry_version": "week6_policy_sources_v1",
+  "raw_policy_dir": "/Users/aman.biswakarma/Desktop/Shadow_project_Aman/claim-denial-prevention/data/policies/raw",
+  "files_written": [
+    "/Users/aman.biswakarma/Desktop/Shadow_project_Aman/claim-denial-prevention/data/policies/raw/hipaa_operational_safeguards_pack.md",
+    "/Users/aman.biswakarma/Desktop/Shadow_project_Aman/claim-denial-prevention/data/policies/raw/payer_policy_reference_pack.md",
+    "/Users/aman.biswakarma/Desktop/Shadow_project_Aman/claim-denial-prevention/data/policies/raw/us_healthcare_claim_policy_seed_pack.md",
+    "/Users/aman.biswakarma/Desktop/Shadow_project_Aman/claim-denial-prevention/data/policies/raw/official_policy_source_registry_summary.md"
+  ],
+  "note": "Run python run_policy_ingest.py after syncing policy documents."
+}

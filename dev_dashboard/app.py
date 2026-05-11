@@ -21,6 +21,7 @@ from src.config import setup_logging
 from tabs.raw_data import render_raw_tab
 from tabs.clean_data import render_clean_tab
 from tabs.ml_analysis import render_ml_tab
+from tabs.policy_rag import render_policy_rag_tab
 from tabs.explainability import render_explainability_tab
 
 setup_logging(level="WARNING")
@@ -37,7 +38,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-st.title("🏥 Claim Denial Prevention — Dev Dashboard")
+st.title("Claim Denial Prevention — Dev Dashboard")
 st.caption("Internal tool · Data exploration · Not for end users")
 
 with st.sidebar:
@@ -86,7 +87,7 @@ with st.sidebar:
         else:
             st.error(f"Training failed:\n{(result.stderr or result.stdout)[:800]}")
 
-    if st.button("🧠 Re-run Week 5 Explanations", use_container_width=True):
+    if st.button("🧠 Re-run Explainability Explanations", use_container_width=True):
         result = _run_script("run_explain.py")
         if result.returncode == 0:
             st.success("Explanations complete. Refresh the page.")
@@ -116,13 +117,14 @@ with st.sidebar:
     st.markdown(f"{'✅' if silver_ok else '⚠️'} Silver layer")
     st.markdown(f"{'✅' if gold_ok else '⚠️'} Gold layer")
     st.markdown(f"{'✅' if models_ok else '⚠️'} ML models")
-    st.markdown(f"{'✅' if explain_ok else '⚠️'} Week 5 explanations")
+    st.markdown(f"{'✅' if explain_ok else '⚠️'} Explainability explanations")
 
-tab_raw, tab_clean, tab_ml, tab_xai = st.tabs([
-    "📊 Raw Data (Bronze)",
-    "✨ Clean Data (Silver)",
-    "🤖 ML Model (Week 4)",
-    "🧠 Explainable AI (Week 5)",
+tab_raw, tab_clean, tab_ml, tab_xai, tab_rag = st.tabs([
+    "Raw Data",
+    "Clean Data",
+    "Risk Model",
+    "Risk Explanations",
+    "Policy Evidence",
 ])
 
 with tab_raw:
@@ -136,3 +138,6 @@ with tab_ml:
 
 with tab_xai:
     render_explainability_tab(gold_dir=GOLD_DIR, models_dir=MODELS_DIR)
+
+with tab_rag:
+    render_policy_rag_tab(root_dir=_ROOT, gold_dir=GOLD_DIR, models_dir=MODELS_DIR)

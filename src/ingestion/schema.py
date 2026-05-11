@@ -21,8 +21,8 @@ CLAIMS_SCHEMA = DataFrameSchema(
         "billed_amount":  Column(float, nullable=True,
                                  checks=Check.ge(0, error="billed_amount must be >= 0")),
         "date":           Column(str,   nullable=False),
-        # New replacement dataset includes this real label. It is optional so
-        # the legacy synthetic-label path still works with old/raw test data.
+        # Replacement data has this real label. Optional keeps legacy data usable.
+        # Storage is later optimized to int8/boolean semantics by table contracts.
         "denial_flag":    Column(int,   nullable=False, required=False,
                                  checks=Check.isin([0, 1], error="denial_flag must be 0 or 1")),
     },
@@ -64,9 +64,11 @@ DIAGNOSIS_SCHEMA = DataFrameSchema(
 COST_SCHEMA = DataFrameSchema(
     columns={
         "procedure_code": Column(str, nullable=False),
-        "average_cost":   Column(int, nullable=False,
+        # Use float in Bronze because replacement/future cost files may contain
+        # decimals. Silver/Gold decide final precision and optimization.
+        "average_cost":   Column(float, nullable=False,
                                   checks=Check.ge(0, error="average_cost must be >= 0")),
-        "expected_cost":  Column(int, nullable=False,
+        "expected_cost":  Column(float, nullable=False,
                                   checks=Check.ge(0, error="expected_cost must be >= 0")),
         "region":         Column(str, nullable=False),
     },

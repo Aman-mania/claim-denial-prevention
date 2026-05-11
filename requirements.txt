@@ -29,3 +29,8 @@ shap>=0.45,<1.0              # model explainability
 # Week 6: sentence-transformers>=3.0, faiss-cpu>=1.8
 # Week 7: fastapi>=0.111, uvicorn>=0.30, python-jose>=3.3, passlib>=1.7
 # Week 8: boto3>=1.34  (AWS deployment)
+
+# ── Week 6: Policy RAG ───────────────────────────────────────────────────────
+pypdf>=4.0,<6.0
+sentence-transformers>=3.0,<6.0    # preferred semantic embedding backend
+faiss-cpu>=1.8,<2.0                # preferred local vector index

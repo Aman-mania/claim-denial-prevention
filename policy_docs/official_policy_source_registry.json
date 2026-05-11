@@ -1,0 +1,166 @@
+{
+  "registry_version": "week6_policy_sources_v1",
+  "notes": "Source registry for claim-denial prevention RAG. Government sources can generally be downloaded for local indexing. Public payer pages are included as reference metadata and summarized in curated seed docs; do not redistribute payer documents unless their site terms allow it.",
+  "sources": [
+    {
+      "source_id": "cms_ncci_overview",
+      "title": "CMS National Correct Coding Initiative (NCCI) Overview",
+      "publisher": "Centers for Medicare & Medicaid Services",
+      "source_type": "official_government",
+      "source_url": "https://www.cms.gov/medicare-medicaid-coordination/national-correct-coding-initiative-ncci",
+      "default_ingest": true,
+      "download_allowed_by_default": true,
+      "tags": ["cms", "ncci", "coding", "improper_payment", "claim_edit"]
+    },
+    {
+      "source_id": "cms_ncci_policy_manual",
+      "title": "Medicare NCCI Policy Manual",
+      "publisher": "Centers for Medicare & Medicaid Services",
+      "source_type": "official_government",
+      "source_url": "https://www.cms.gov/medicare/coding-billing/national-correct-coding-initiative-ncci-edits/medicare-ncci-policy-manual",
+      "default_ingest": true,
+      "download_allowed_by_default": true,
+      "tags": ["cms", "ncci", "coding", "procedure", "cpt", "hcpcs", "policy_manual"]
+    },
+    {
+      "source_id": "cms_ncci_medicare_edits",
+      "title": "Medicare NCCI Edits",
+      "publisher": "Centers for Medicare & Medicaid Services",
+      "source_type": "official_government",
+      "source_url": "https://www.cms.gov/medicare-medicaid-coordination/national-correct-coding-initiative-ncci/ncci-medicare",
+      "default_ingest": true,
+      "download_allowed_by_default": true,
+      "tags": ["cms", "ncci", "ptp", "mue", "coding_edit", "procedure_combination"]
+    },
+    {
+      "source_id": "cms_prior_auth_preclaim",
+      "title": "Prior Authorization and Pre-Claim Review Initiatives",
+      "publisher": "Centers for Medicare & Medicaid Services",
+      "source_type": "official_government",
+      "source_url": "https://www.cms.gov/Research-Statistics-Data-and-Systems/Monitoring-Programs/Medicare-FFS-Compliance-Programs/Prior-Authorization-Initiatives/Prior-Authorization-of-Non-emergent-Hyperbaric-Oxygen.html",
+      "default_ingest": true,
+      "download_allowed_by_default": true,
+      "tags": ["cms", "prior_authorization", "pre_claim_review", "documentation", "medical_necessity"]
+    },
+    {
+      "source_id": "cms_coverage_center",
+      "title": "Medicare Coverage Center",
+      "publisher": "Centers for Medicare & Medicaid Services",
+      "source_type": "official_government",
+      "source_url": "https://www.cms.gov/medicare/coverage/center",
+      "default_ingest": true,
+      "download_allowed_by_default": true,
+      "tags": ["cms", "coverage", "ncd", "lcd", "medical_necessity"]
+    },
+    {
+      "source_id": "cms_local_coverage_determinations",
+      "title": "Local Coverage Determinations (LCDs)",
+      "publisher": "Centers for Medicare & Medicaid Services",
+      "source_type": "official_government",
+      "source_url": "https://www.cms.gov/Medicare/Coverage/DeterminationProcess/LCDs.html",
+      "default_ingest": true,
+      "download_allowed_by_default": true,
+      "tags": ["cms", "lcd", "local_coverage", "medical_necessity", "mac"]
+    },
+    {
+      "source_id": "cms_medicare_coverage_database",
+      "title": "Medicare Coverage Database Search",
+      "publisher": "Centers for Medicare & Medicaid Services",
+      "source_type": "official_government",
+      "source_url": "https://www.cms.gov/medicare-coverage-database/search.aspx",
+      "default_ingest": true,
+      "download_allowed_by_default": true,
+      "tags": ["cms", "mcd", "ncd", "lcd", "article", "coding_article"]
+    },
+    {
+      "source_id": "hhs_hipaa_privacy_rule",
+      "title": "HIPAA Privacy Rule",
+      "publisher": "U.S. Department of Health and Human Services",
+      "source_type": "official_government",
+      "source_url": "https://www.hhs.gov/hipaa/for-professionals/privacy/index.html",
+      "default_ingest": true,
+      "download_allowed_by_default": true,
+      "tags": ["hhs", "hipaa", "privacy", "phi", "minimum_necessary", "claim_processing"]
+    },
+    {
+      "source_id": "hhs_hipaa_security_rule",
+      "title": "HIPAA Security Rule",
+      "publisher": "U.S. Department of Health and Human Services",
+      "source_type": "official_government",
+      "source_url": "https://www.hhs.gov/hipaa/for-professionals/security/index.html",
+      "default_ingest": true,
+      "download_allowed_by_default": true,
+      "tags": ["hhs", "hipaa", "security", "ephi", "safeguards", "audit_logs"]
+    },
+    {
+      "source_id": "hhs_hipaa_breach_notification_rule",
+      "title": "HIPAA Breach Notification Rule",
+      "publisher": "U.S. Department of Health and Human Services",
+      "source_type": "official_government",
+      "source_url": "https://www.hhs.gov/hipaa/for-professionals/breach-notification/index.html",
+      "default_ingest": true,
+      "download_allowed_by_default": true,
+      "tags": ["hhs", "hipaa", "breach", "notification", "phi", "security_incident"]
+    },
+    {
+      "source_id": "hhs_hipaa_enforcement_rule",
+      "title": "HIPAA Enforcement Rule",
+      "publisher": "U.S. Department of Health and Human Services",
+      "source_type": "official_government",
+      "source_url": "https://www.hhs.gov/hipaa/for-professionals/special-topics/enforcement-rule/index.html",
+      "default_ingest": true,
+      "download_allowed_by_default": true,
+      "tags": ["hhs", "hipaa", "enforcement", "compliance", "penalty"]
+    },
+    {
+      "source_id": "uhc_commercial_medical_drug_policies",
+      "title": "UnitedHealthcare Commercial Medical & Drug Policies",
+      "publisher": "UnitedHealthcare",
+      "source_type": "public_payer_reference",
+      "source_url": "https://www.uhcprovider.com/en/policies-protocols/commercial-policies/commercial-medical-drug-policies.html",
+      "default_ingest": false,
+      "download_allowed_by_default": false,
+      "tags": ["payer", "unitedhealthcare", "medical_policy", "medical_necessity", "prior_authorization"]
+    },
+    {
+      "source_id": "aetna_clinical_policy_bulletins",
+      "title": "Aetna Clinical Policy Bulletins",
+      "publisher": "Aetna",
+      "source_type": "public_payer_reference",
+      "source_url": "https://www.aetna.com/health-care-professionals/clinical-policy-bulletins.html",
+      "default_ingest": false,
+      "download_allowed_by_default": false,
+      "tags": ["payer", "aetna", "clinical_policy_bulletin", "medical_necessity", "experimental_unproven"]
+    },
+    {
+      "source_id": "cigna_coverage_policies_medical_necessity",
+      "title": "Cigna Coverage Policies and Medical Necessity Definitions",
+      "publisher": "Cigna Healthcare",
+      "source_type": "public_payer_reference",
+      "source_url": "https://www.cigna.com/health-care-providers/coverage-and-claims/policies/medical-necessity-definitions",
+      "default_ingest": false,
+      "download_allowed_by_default": false,
+      "tags": ["payer", "cigna", "coverage_policy", "medical_necessity", "plan_document"]
+    },
+    {
+      "source_id": "anthem_medical_policies_clinical_um",
+      "title": "Anthem Medical Policies and Clinical UM Guidelines",
+      "publisher": "Anthem",
+      "source_type": "public_payer_reference",
+      "source_url": "https://www.anthem.com/provider/policies/clinical-guidelines/",
+      "default_ingest": false,
+      "download_allowed_by_default": false,
+      "tags": ["payer", "anthem", "medical_policy", "clinical_um", "medical_necessity", "documentation"]
+    },
+    {
+      "source_id": "internal_claim_validation_rules",
+      "title": "Internal Claim Validation Rules for Demo Dataset",
+      "publisher": "Claim Denial Prevention Project",
+      "source_type": "internal_project_policy",
+      "source_url": "policy_docs/rag_seed/us_healthcare_claim_policy_seed_pack.md",
+      "default_ingest": true,
+      "download_allowed_by_default": true,
+      "tags": ["internal", "claim_completeness", "demo_dataset", "diagnosis", "procedure", "billed_amount", "documentation"]
+    }
+  ]
+}

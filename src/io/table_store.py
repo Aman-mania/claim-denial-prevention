@@ -14,6 +14,8 @@ from typing import Protocol
 
 import pandas as pd
 
+from src.io.table_contracts import enforce_table_contract
+
 
 class TableStore(Protocol):
     """Minimal table IO contract used by pipeline layers."""
@@ -30,8 +32,9 @@ class LocalTableStore:
     """
     Local Parquet-backed table store.
 
-    This exists so cloud migration later swaps the IO implementation, not the
-    explainability/RAG business logic.
+    Known table names are coerced through src.io.table_contracts before writing
+    so local Parquet schemas stay compatible with the future Delta/Unity Catalog
+    contracts.
     """
 
     root_dir: Path
@@ -54,7 +57,9 @@ class LocalTableStore:
     def write_table(self, name: str, df: pd.DataFrame) -> Path:
         path = self._path(name)
         path.parent.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(path, index=False, engine="pyarrow")
+        table_name = name[:-len(self.suffix)] if name.endswith(self.suffix) else name
+        df_out = enforce_table_contract(df, table_name)
+        df_out.to_parquet(path, index=False, engine="pyarrow")
         return path
 
 
