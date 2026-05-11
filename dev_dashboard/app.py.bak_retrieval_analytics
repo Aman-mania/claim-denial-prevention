@@ -23,7 +23,6 @@ from tabs.clean_data import render_clean_tab
 from tabs.ml_analysis import render_ml_tab
 from tabs.policy_rag import render_policy_rag_tab
 from tabs.explainability import render_explainability_tab
-from tabs.retrieval_analytics import render_retrieval_analytics_tab
 
 setup_logging(level="WARNING")
 
@@ -120,13 +119,13 @@ with st.sidebar:
     st.markdown(f"{'✅' if models_ok else '⚠️'} ML models")
     st.markdown(f"{'✅' if explain_ok else '⚠️'} Explainability explanations")
 
-tab_raw, tab_clean, tab_ml, tab_xai, tab_rag, tab_retrieval_analytics = st.tabs([
+tab_raw, tab_clean, tab_ml, tab_xai, tab_rag = st.tabs([
     "Raw Data",
     "Clean Data",
     "Risk Model",
     "Risk Explanations",
     "Policy Evidence",
-    "Retrieval Analytics"])
+])
 
 with tab_raw:
     render_raw_tab(bronze_dir=BRONZE_DIR)
@@ -142,6 +141,3 @@ with tab_xai:
 
 with tab_rag:
     render_policy_rag_tab(root_dir=_ROOT, gold_dir=GOLD_DIR, models_dir=MODELS_DIR)
-
-with tab_retrieval_analytics:
-    render_retrieval_analytics_tab(root_dir=_ROOT, gold_dir=GOLD_DIR, models_dir=MODELS_DIR)
