@@ -2,10 +2,9 @@
 """Convenience runner for project test suites.
 
 Examples:
-    python tools/run_tests.py --suite week5
-    python tools/run_tests.py --suite week5 --fast
+    python tools/run_tests.py --suite week7
+    python tools/run_tests.py --suite api --fast
     python tools/run_tests.py --suite all
-    python tools/run_tests.py --suite explainability
 """
 
 from __future__ import annotations
@@ -19,10 +18,19 @@ ROOT = Path(__file__).resolve().parents[1]
 
 SUITES: dict[str, list[str]] = {
     "week5": ["tests/explainability"],
+    "week6": ["tests/rag"],
+    "week7": ["tests/rules", "tests/agent", "tests/auth", "tests/api", "tests/product_ui"],
+    "rules": ["tests/rules"],
+    "agent": ["tests/agent"],
+    "auth": ["tests/auth"],
+    "api": ["tests/api"],
+    "product_ui": ["tests/product_ui"],
+    "dashboard": ["tests/dashboard"],
     "explainability": ["tests/explainability"],
     "observability": ["tests/observability"],
     "inference": ["tests/inference"],
     "ml": ["tests/ml"],
+    "rag": ["tests/rag"],
     "pipeline": ["tests/ingestion", "tests/silver", "tests/gold", "tests/ml", "tests/inference"],
     "all": ["tests"],
 }
