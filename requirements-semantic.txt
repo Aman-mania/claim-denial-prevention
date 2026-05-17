@@ -1,0 +1,3 @@
+# Optional local semantic backend. Not used in default Docker/AWS image.
+sentence-transformers>=3.0,<6.0
+faiss-cpu>=1.8,<2.0

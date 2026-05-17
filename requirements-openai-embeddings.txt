@@ -1,0 +1,2 @@
+# Optional/local install for OpenAI embedding mode.
+openai>=1.40,<3.0

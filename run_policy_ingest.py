@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
-"""Week 6 — Policy Document Ingestion and Vector Index Build.
+"""Week 6/8 — Policy Document Ingestion and Vector Index Build.
 
 Flow:
   policy docs (PDF/TXT/MD)
   → chunks with metadata
-  → sentence-transformer embeddings
-  → FAISS local vector index
-  → policy_chunks.parquet + policy_metadata.json + policy.faiss
+  → configured embeddings (OpenAI for Docker/AWS by default)
+  → configured vector index (sklearn for Docker/AWS by default)
+  → policy_chunks.parquet + policy_metadata.json + vector index artifact
 
-Usage:
-  python run_policy_ingest.py
-  python run_policy_ingest.py --raw-dir data/policies/raw --model sentence-transformers/all-MiniLM-L6-v2
+Examples:
+  # Docker/AWS semantic path, requires OPENAI_API_KEY
+  python run_policy_ingest.py --embedding-backend openai --vector-backend sklearn --no-embedding-fallback
+
+  # Local/offline fallback path
+  python run_policy_ingest.py --embedding-backend tfidf --vector-backend sklearn
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -43,6 +47,11 @@ DEFAULT_VECTOR_DIR = BASE_DIR / "data" / "vector_store"
 SAMPLE_POLICY = BASE_DIR / "policy_docs" / "sample_claim_denial_policy_pack.md"
 
 
+def _env(name: str, default: str) -> str:
+    value = os.getenv(name)
+    return default if value is None or str(value).strip() == "" else str(value).strip()
+
+
 def _bootstrap_sample_policy(raw_dir: Path) -> bool:
     raw_dir.mkdir(parents=True, exist_ok=True)
     has_docs = any(path.is_file() and path.suffix.lower() in {".txt", ".md", ".markdown", ".pdf"} for path in raw_dir.rglob("*"))
@@ -55,20 +64,42 @@ def _bootstrap_sample_policy(raw_dir: Path) -> bool:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build the Week 6 local policy RAG index.")
+    default_embedding_backend = _env("RAG_EMBEDDING_BACKEND", "auto")
+    default_vector_backend = _env("RAG_VECTOR_BACKEND", "sklearn")
+    default_model = _env(
+        "RAG_EMBEDDING_MODEL",
+        _env("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small") if default_embedding_backend == "openai" else DEFAULT_EMBEDDING_MODEL,
+    )
+
+    parser = argparse.ArgumentParser(description="Build the policy RAG index.")
     parser.add_argument("--raw-dir", type=Path, default=DEFAULT_RAW_DIR)
     parser.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     parser.add_argument("--vector-dir", type=Path, default=DEFAULT_VECTOR_DIR)
-    parser.add_argument("--model", default=DEFAULT_EMBEDDING_MODEL)
-    parser.add_argument("--embedding-backend", choices=["auto", "sentence-transformers", "tfidf", "sklearn-hashing"], default="auto", help="Embedding backend. auto prefers Sentence Transformers and falls back to TF-IDF unless disabled.")
-    parser.add_argument("--hashing-features", type=int, default=DEFAULT_HASHING_FEATURES, help="Feature dimension for sklearn-hashing fallback.")
-    parser.add_argument("--tfidf-max-features", type=int, default=DEFAULT_TFIDF_MAX_FEATURES, help="Maximum vocabulary size for TF-IDF fallback/backend.")
-    parser.add_argument("--fallback-backend", choices=["tfidf", "sklearn-hashing"], default="tfidf", help="Fallback used when --embedding-backend auto/sentence-transformers cannot load the model.")
-    parser.add_argument("--no-embedding-fallback", action="store_true", help="Fail instead of falling back to sklearn hashing when Sentence Transformers is unavailable.")
-    parser.add_argument("--vector-backend", choices=["auto", "faiss", "numpy"], default="auto", help="Local vector index backend. auto uses FAISS when installed and NumPy search otherwise.")
-    parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE_WORDS)
-    parser.add_argument("--overlap", type=int, default=DEFAULT_CHUNK_OVERLAP_WORDS)
-    parser.add_argument("--no-bootstrap-sample", action="store_true", help="Do not copy the sample policy pack when raw-dir is empty.")
+    parser.add_argument("--model", default=default_model)
+    parser.add_argument(
+        "--embedding-backend",
+        choices=["auto", "openai", "sentence-transformers", "tfidf", "sklearn-hashing"],
+        default=default_embedding_backend,
+        help="Embedding backend. Docker/AWS recommended value: openai.",
+    )
+    parser.add_argument("--hashing-features", type=int, default=DEFAULT_HASHING_FEATURES)
+    parser.add_argument("--tfidf-max-features", type=int, default=DEFAULT_TFIDF_MAX_FEATURES)
+    parser.add_argument("--fallback-backend", choices=["tfidf", "sklearn-hashing"], default=_env("RAG_FALLBACK_BACKEND", "tfidf"))
+    parser.add_argument(
+        "--no-embedding-fallback",
+        action="store_true",
+        default=_env("RAG_ALLOW_EMBEDDING_FALLBACK", "true").lower() in {"0", "false", "no"},
+        help="Fail instead of falling back when the selected embedding backend is unavailable.",
+    )
+    parser.add_argument(
+        "--vector-backend",
+        choices=["auto", "sklearn", "faiss", "numpy"],
+        default=default_vector_backend,
+        help="Vector index backend. Docker/AWS recommended value: sklearn.",
+    )
+    parser.add_argument("--chunk-size", type=int, default=int(_env("RAG_CHUNK_SIZE_WORDS", str(DEFAULT_CHUNK_SIZE_WORDS))))
+    parser.add_argument("--overlap", type=int, default=int(_env("RAG_CHUNK_OVERLAP_WORDS", str(DEFAULT_CHUNK_OVERLAP_WORDS))))
+    parser.add_argument("--no-bootstrap-sample", action="store_true")
     return parser.parse_args()
 
 
@@ -79,7 +110,7 @@ def main() -> int:
 
     print()
     print("╔══════════════════════════════════════════════════════════════╗")
-    print("║   Claim Denial Prevention — Week 6: Policy RAG Ingestion    ║")
+    print("║   Claim Denial Prevention — Policy RAG Ingestion            ║")
     print("╚══════════════════════════════════════════════════════════════╝")
 
     try:
@@ -141,6 +172,7 @@ def main() -> int:
             "embedding_dim": int(embeddings.shape[1]),
             "vector_backend": index_info.get("vector_backend"),
             "faiss_index_written": index_info.get("faiss_index_written"),
+            "sklearn_index_written": index_info.get("sklearn_index_written"),
             "chunk_table_path": str(chunk_path),
             **index_info,
         }
@@ -152,9 +184,9 @@ def main() -> int:
         print(f"  Policy chunks created:   {len(chunks):,}")
         print(f"  Embedding backend:       {index_info.get('embedding_backend')}")
         print(f"  Embedding model:         {index_info.get('embedding_model')}")
-        print(f"  Chunk table:             {chunk_path}")
         print(f"  Vector backend:          {index_info.get('vector_backend')}")
         print(f"  Vector index:            {index_info['index_path']}")
+        print(f"  Chunk table:             {chunk_path}")
         if bootstrapped:
             print("  Note: sample educational policy pack was copied because raw policy dir was empty.")
         print("\n╔══════════════════════════════════════════════════════════════╗")

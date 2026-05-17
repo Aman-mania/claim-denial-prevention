@@ -1,13 +1,15 @@
-"""Embedding generation for Week 6 policy RAG.
+"""Embedding generation for policy RAG.
 
 Backends
 --------
-1. sentence-transformers: preferred semantic local backend.
-2. tfidf: strong offline/local fallback for a small policy corpus.
-3. sklearn-hashing: stateless emergency fallback with no persisted vocabulary.
+1. openai: preferred Docker/AWS semantic backend using the OpenAI Embeddings API.
+2. sentence-transformers: optional local semantic backend when the model is cached.
+3. tfidf: offline/local fallback for corporate or no-network environments.
+4. sklearn-hashing: stateless emergency fallback.
 
-The design keeps ingestion/query embedding compatible by persisting any fitted
-retrieval artifact (TF-IDF vectorizer) beside the vector index metadata.
+OpenAI is intentionally used only for policy chunks and generic reason/policy
+queries. Do not send raw claim payloads, patient identifiers, or PHI into this
+embedder.
 """
 
 from __future__ import annotations
@@ -15,8 +17,9 @@ from __future__ import annotations
 import json
 import os
 import pickle
+import time
 from pathlib import Path
-from typing import Iterable, Literal
+from typing import Iterable, Literal, Any
 
 import numpy as np
 import structlog
@@ -28,13 +31,16 @@ logger = structlog.get_logger(__name__)
 
 DEFAULT_HASHING_FEATURES = int(os.getenv("RAG_HASHING_FEATURES", "4096"))
 DEFAULT_TFIDF_MAX_FEATURES = int(os.getenv("RAG_TFIDF_MAX_FEATURES", "8192"))
+DEFAULT_OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+DEFAULT_OPENAI_EMBEDDING_BATCH_SIZE = int(os.getenv("OPENAI_EMBEDDING_BATCH_SIZE", "64"))
+DEFAULT_OPENAI_EMBEDDING_RETRIES = int(os.getenv("OPENAI_EMBEDDING_RETRIES", "3"))
+DEFAULT_OPENAI_EMBEDDING_TIMEOUT_SECONDS = float(os.getenv("OPENAI_EMBEDDING_TIMEOUT_SECONDS", "30"))
 VECTOR_METADATA_FILENAME = "policy_metadata.json"
 TFIDF_VECTORIZER_FILENAME = "policy_tfidf_vectorizer.pkl"
-EmbeddingBackend = Literal["auto", "sentence-transformers", "tfidf", "sklearn-hashing"]
+EmbeddingBackend = Literal["auto", "openai", "sentence-transformers", "tfidf", "sklearn-hashing"]
 
 
 def _normalize_rows(vectors: np.ndarray) -> np.ndarray:
-    """L2-normalize dense vectors row-wise for cosine/IP search."""
     arr = np.asarray(vectors, dtype="float32")
     if arr.ndim != 2:
         raise ValueError("vectors must be a 2D matrix")
@@ -47,14 +53,203 @@ def _safe_texts(texts: Iterable[str]) -> list[str]:
     return [str(text or "") for text in texts]
 
 
-class TfidfTextEmbedder:
-    """Offline retrieval embedder using a persisted TF-IDF vocabulary.
+def _embedding_from_openai_item(item: Any) -> list[float]:
+    if isinstance(item, dict):
+        return item["embedding"]
+    return item.embedding
 
-    TF-IDF is more suitable than HashingVectorizer for our small local policy
-    corpus because it learns corpus-specific vocabulary and IDF weights. During
-    ingestion it fits on policy chunks and saves the vectorizer. During retrieval
-    it loads the same vectorizer so query vectors are compatible with the index.
+
+class OpenAITextEmbedder:
+    """Semantic embedding backend using the OpenAI Embeddings API.
+
+    This backend is the recommended Docker/AWS backend because it avoids bundling
+    PyTorch and Hugging Face models into the Docker image. It should be used for
+    policy documents and generic claim-reason queries only.
     """
+
+    backend_name = "openai"
+
+    def __init__(
+        self,
+        *,
+        model_name: str | None = None,
+        api_key: str | None = None,
+        batch_size: int = DEFAULT_OPENAI_EMBEDDING_BATCH_SIZE,
+        timeout_seconds: float = DEFAULT_OPENAI_EMBEDDING_TIMEOUT_SECONDS,
+        retries: int = DEFAULT_OPENAI_EMBEDDING_RETRIES,
+        dimensions: int | None = None,
+        normalize_embeddings: bool = True,
+        client: Any | None = None,
+        allow_fallback: bool = False,
+        fallback_backend: Literal["tfidf", "sklearn-hashing"] = "tfidf",
+        artifact_dir: Path | None = None,
+        tfidf_max_features: int = DEFAULT_TFIDF_MAX_FEATURES,
+        hashing_features: int = DEFAULT_HASHING_FEATURES,
+        error_tracker: ErrorTracker | None = None,
+    ) -> None:
+        self.model_name = model_name or DEFAULT_OPENAI_EMBEDDING_MODEL
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        self.batch_size = int(batch_size)
+        self.timeout_seconds = float(timeout_seconds)
+        self.retries = int(retries)
+        self.dimensions = dimensions or _optional_int(os.getenv("OPENAI_EMBEDDING_DIMENSIONS"))
+        self.normalize_embeddings = bool(normalize_embeddings)
+        self.client = client
+        self.allow_fallback = bool(allow_fallback)
+        self.fallback_backend = fallback_backend
+        self.artifact_dir = Path(artifact_dir) if artifact_dir is not None else None
+        self.tfidf_max_features = int(tfidf_max_features)
+        self.hashing_features = int(hashing_features)
+        self.error_tracker = error_tracker or ErrorTracker()
+        self._fallback: TfidfTextEmbedder | HashingTextEmbedder | None = None
+        self._last_dim: int | None = None
+
+    def _fallback_embedder(self, reason: Exception | None = None):
+        if not self.allow_fallback:
+            if reason is not None:
+                raise reason
+            raise ClaimDenialError(
+                ErrorCode.RAG_EMBEDDING_MODEL_LOAD_FAILED,
+                "OpenAI embedding fallback is disabled.",
+                component="rag",
+                metadata={"stage": "openai_fallback_disabled"},
+            )
+        if self._fallback is None:
+            logger.warning(
+                "openai_embedding_unavailable_using_local_fallback",
+                model_name=self.model_name,
+                fallback_backend=self.fallback_backend,
+                reason=str(reason) if reason else None,
+            )
+            if self.fallback_backend == "sklearn-hashing":
+                self._fallback = HashingTextEmbedder(
+                    n_features=self.hashing_features,
+                    normalize_embeddings=self.normalize_embeddings,
+                    error_tracker=self.error_tracker,
+                )
+            else:
+                self._fallback = TfidfTextEmbedder(
+                    artifact_dir=self.artifact_dir,
+                    max_features=self.tfidf_max_features,
+                    normalize_embeddings=self.normalize_embeddings,
+                    error_tracker=self.error_tracker,
+                )
+        return self._fallback
+
+    def _load_client(self):
+        if self.client is not None:
+            return self.client
+        if not self.api_key:
+            raise ClaimDenialError(
+                ErrorCode.RAG_EMBEDDING_MODEL_LOAD_FAILED,
+                "OPENAI_API_KEY is required when RAG_EMBEDDING_BACKEND=openai.",
+                component="rag",
+                metadata={"stage": "load_openai_client"},
+            )
+        try:
+            from openai import OpenAI
+        except ModuleNotFoundError as exc:
+            raise ClaimDenialError(
+                ErrorCode.RAG_EMBEDDING_MODEL_LOAD_FAILED,
+                "openai package is not installed. Install requirements-openai.txt or requirements-docker-api.txt.",
+                component="rag",
+                metadata={"stage": "load_openai_client"},
+            ) from exc
+        self.client = OpenAI(api_key=self.api_key, timeout=self.timeout_seconds)
+        return self.client
+
+    def _embed_batch_once(self, client: Any, batch: list[str]) -> list[list[float]]:
+        kwargs: dict[str, Any] = {"model": self.model_name, "input": batch}
+        if self.dimensions:
+            kwargs["dimensions"] = int(self.dimensions)
+        response = client.embeddings.create(**kwargs)
+        data = response["data"] if isinstance(response, dict) else response.data
+        return [_embedding_from_openai_item(item) for item in data]
+
+    def embed_texts(self, texts: Iterable[str]) -> np.ndarray:
+        texts = _safe_texts(texts)
+        if not texts:
+            return np.zeros((0, 0), dtype="float32")
+        try:
+            client = self._load_client()
+            vectors: list[list[float]] = []
+            for start in range(0, len(texts), self.batch_size):
+                batch = texts[start:start + self.batch_size]
+                last_exc: Exception | None = None
+                for attempt in range(self.retries + 1):
+                    try:
+                        vectors.extend(self._embed_batch_once(client, batch))
+                        break
+                    except Exception as exc:  # pragma: no cover - network/provider dependent
+                        last_exc = exc
+                        if attempt >= self.retries:
+                            raise
+                        sleep_seconds = min(2 ** attempt, 8)
+                        logger.warning(
+                            "openai_embedding_retry",
+                            attempt=attempt + 1,
+                            sleep_seconds=sleep_seconds,
+                            reason=str(exc),
+                        )
+                        time.sleep(sleep_seconds)
+                if last_exc is not None and len(vectors) < start + len(batch):
+                    raise last_exc
+            arr = np.asarray(vectors, dtype="float32")
+            if arr.ndim != 2:
+                raise ValueError("OpenAI embeddings response was not a 2D vector matrix")
+            if self.normalize_embeddings:
+                arr = _normalize_rows(arr)
+            self._last_dim = int(arr.shape[1])
+            logger.info("openai_embeddings_generated", rows=len(texts), dim=self._last_dim, model=self.model_name)
+            return arr.astype("float32", copy=False)
+        except ClaimDenialError as exc:
+            if self.allow_fallback:
+                return self._fallback_embedder(exc).embed_texts(texts)
+            raise
+        except Exception as exc:
+            if self.allow_fallback:
+                return self._fallback_embedder(exc).embed_texts(texts)
+            self.error_tracker.record_exception(
+                exc,
+                component="rag",
+                stage="generate_openai_embeddings",
+                fallback_code=ErrorCode.RAG_EMBEDDING_GENERATION_FAILED,
+                metadata={"stage": "generate_openai_embeddings", "count": len(texts), "model": self.model_name},
+            )
+            raise ClaimDenialError(
+                ErrorCode.RAG_EMBEDDING_GENERATION_FAILED,
+                f"OpenAI embedding generation failed: {exc}",
+                component="rag",
+                metadata={"stage": "generate_openai_embeddings", "count": len(texts), "model": self.model_name},
+            ) from exc
+
+    def embed_query(self, query: str) -> np.ndarray:
+        vectors = self.embed_texts([query])
+        if vectors.size == 0:
+            raise ClaimDenialError(
+                ErrorCode.RAG_EMBEDDING_GENERATION_FAILED,
+                "Query embedding was empty.",
+                component="rag",
+                metadata={"stage": "embed_openai_query"},
+            )
+        return vectors[0]
+
+    def metadata(self) -> dict:
+        if self._fallback is not None:
+            return self._fallback.metadata()
+        return {
+            "embedding_backend": self.backend_name,
+            "embedding_model": self.model_name,
+            "embedding_dim": self._last_dim,
+            "openai_embedding_model": self.model_name,
+            "openai_embedding_dimensions_requested": self.dimensions,
+            "normalize_embeddings": self.normalize_embeddings,
+            "data_policy": "policy_docs_and_generic_reason_queries_only_no_phi",
+        }
+
+
+class TfidfTextEmbedder:
+    """Offline retrieval embedder using a persisted TF-IDF vocabulary."""
 
     backend_name = "tfidf"
 
@@ -216,7 +411,6 @@ class HashingTextEmbedder:
             return self._vectorizer
         try:
             from sklearn.feature_extraction.text import HashingVectorizer
-
             self._vectorizer = HashingVectorizer(
                 n_features=self.n_features,
                 alternate_sign=False,
@@ -366,22 +560,6 @@ class SentenceTransformerEmbedder:
             self.effective_model_name = self.model_name
             logger.info("embedding_model_loaded", model_name=self.model_name)
             return self._model
-        except ModuleNotFoundError as exc:
-            if self.allow_fallback:
-                return self._fallback_embedder(exc)
-            self.error_tracker.record_exception(
-                exc,
-                component="rag",
-                stage="load_embedding_model",
-                fallback_code=ErrorCode.RAG_EMBEDDING_MODEL_LOAD_FAILED,
-                metadata={"stage": "load_embedding_model", "model_name": self.model_name},
-            )
-            raise ClaimDenialError(
-                ErrorCode.RAG_EMBEDDING_MODEL_LOAD_FAILED,
-                "sentence-transformers is not installed. Install it or use --embedding-backend tfidf.",
-                component="rag",
-                metadata={"stage": "load_embedding_model", "model_name": self.model_name},
-            ) from exc
         except Exception as exc:
             if self.allow_fallback:
                 return self._fallback_embedder(exc)
@@ -407,23 +585,13 @@ class SentenceTransformerEmbedder:
             model = self._load_model()
             if isinstance(model, (HashingTextEmbedder, TfidfTextEmbedder)):
                 return model.embed_texts(texts)
-            try:
-                vectors = model.encode(
-                    texts,
-                    batch_size=self.batch_size,
-                    show_progress_bar=False,
-                    convert_to_numpy=True,
-                    normalize_embeddings=self.normalize_embeddings,
-                )
-            except TypeError:
-                vectors = model.encode(
-                    texts,
-                    batch_size=self.batch_size,
-                    show_progress_bar=False,
-                    convert_to_numpy=True,
-                )
-                if self.normalize_embeddings:
-                    vectors = _normalize_rows(np.asarray(vectors, dtype="float32"))
+            vectors = model.encode(
+                texts,
+                batch_size=self.batch_size,
+                show_progress_bar=False,
+                convert_to_numpy=True,
+                normalize_embeddings=self.normalize_embeddings,
+            )
             vectors = np.asarray(vectors, dtype="float32")
             if self.normalize_embeddings:
                 vectors = _normalize_rows(vectors)
@@ -469,6 +637,12 @@ class SentenceTransformerEmbedder:
         }
 
 
+def _optional_int(value: str | None) -> int | None:
+    if value is None or str(value).strip() == "":
+        return None
+    return int(value)
+
+
 def create_embedder(
     *,
     backend: EmbeddingBackend = "auto",
@@ -482,13 +656,24 @@ def create_embedder(
     tfidf_max_features: int = DEFAULT_TFIDF_MAX_FEATURES,
     error_tracker: ErrorTracker | None = None,
 ):
-    """Factory for local embedding backends.
+    """Factory for policy embedding backends.
 
-    `auto` prefers Sentence Transformers and falls back to TF-IDF by default.
-    `tfidf` is the recommended offline fallback for the small policy corpus.
-    `sklearn-hashing` remains available as a stateless emergency fallback.
+    `openai` is the recommended Docker/AWS semantic backend.
+    `auto` keeps legacy behavior: Sentence Transformers with TF-IDF fallback.
     """
     backend = (backend or "auto").strip().lower()  # type: ignore[assignment]
+    if backend in {"openai", "openai-api", "openai_embeddings", "openai-embeddings"}:
+        return OpenAITextEmbedder(
+            model_name=model_name if model_name and model_name != DEFAULT_EMBEDDING_MODEL else DEFAULT_OPENAI_EMBEDDING_MODEL,
+            batch_size=int(os.getenv("OPENAI_EMBEDDING_BATCH_SIZE", str(batch_size or DEFAULT_OPENAI_EMBEDDING_BATCH_SIZE))),
+            normalize_embeddings=normalize_embeddings,
+            allow_fallback=allow_fallback,
+            fallback_backend=fallback_backend,
+            artifact_dir=artifact_dir,
+            hashing_features=hashing_features,
+            tfidf_max_features=tfidf_max_features,
+            error_tracker=error_tracker,
+        )
     if backend in {"tfidf", "sklearn-tfidf", "local-tfidf"}:
         return TfidfTextEmbedder(
             artifact_dir=artifact_dir,
@@ -527,6 +712,13 @@ def embedder_from_vector_metadata(*, vector_dir: Path, error_tracker: ErrorTrack
     backend = str(payload.get("embedding_backend") or "auto")
     model_name = payload.get("embedding_model")
     dim = int(payload.get("embedding_dim") or payload.get("hashing_features") or DEFAULT_HASHING_FEATURES)
+
+    if backend == "openai" or str(model_name).startswith("text-embedding-"):
+        return OpenAITextEmbedder(
+            model_name=model_name or DEFAULT_OPENAI_EMBEDDING_MODEL,
+            allow_fallback=False,
+            error_tracker=error_tracker,
+        )
 
     if backend == "tfidf" or str(model_name).startswith("sklearn-tfidf"):
         return TfidfTextEmbedder(

@@ -1,15 +1,16 @@
-"""Local vector store for Week 6 RAG.
+"""Local vector store for policy RAG.
 
-The local implementation prefers FAISS when available, but it is not a hard
-runtime requirement. When FAISS is unavailable, the store automatically falls
-back to a persisted NumPy matrix and brute-force inner-product search. This keeps
-local development reliable while preserving the same VectorStore boundary for a
-future Databricks Vector Search implementation.
+The Docker/AWS default is now a scikit-learn nearest-neighbor index. This avoids
+FAISS and avoids the previous NumPy-only search backend while keeping artifacts
+portable. FAISS remains available as an optional local backend. The old NumPy
+backend is kept only for backward compatibility with existing artifacts and is
+not used by the Docker/AWS default.
 """
 
 from __future__ import annotations
 
 import json
+import pickle
 from pathlib import Path
 from typing import Any, Literal
 
@@ -22,9 +23,10 @@ from src.rag.schemas import PolicySearchResult
 logger = structlog.get_logger(__name__)
 
 INDEX_FILENAME = "policy.faiss"
+SKLEARN_INDEX_FILENAME = "policy_sklearn_nn.pkl"
 VECTOR_MATRIX_FILENAME = "policy_vectors.npy"
 METADATA_FILENAME = "policy_metadata.json"
-VectorBackend = Literal["auto", "faiss", "numpy"]
+VectorBackend = Literal["auto", "sklearn", "faiss", "numpy"]
 
 
 def _as_float32_matrix(vectors: np.ndarray) -> np.ndarray:
@@ -51,17 +53,10 @@ def _row_normalize(vectors: np.ndarray) -> np.ndarray:
 
 
 class LocalFaissVectorStore:
-    """Local vector store with FAISS-preferred and NumPy fallback backends.
+    """Local vector store with sklearn default and optional FAISS backend.
 
-    The class name is kept for backward compatibility with earlier Week 6 code.
-    Its behavior is now backend-aware:
-      - vector_backend="auto" uses FAISS if installed; otherwise NumPy search.
-      - vector_backend="faiss" requires FAISS at build time.
-      - vector_backend="numpy" never imports FAISS.
-
-    Both backends persist the normalized vector matrix as ``policy_vectors.npy``.
-    That means a FAISS-built index can still be searched through the NumPy
-    fallback later if FAISS is unavailable in the active environment.
+    Class name is retained for backward compatibility. New code should use the
+    alias ``LocalVectorStore`` below.
     """
 
     def __init__(
@@ -73,11 +68,13 @@ class LocalFaissVectorStore:
     ) -> None:
         self.vector_dir = Path(vector_dir)
         self.index_path = self.vector_dir / INDEX_FILENAME
+        self.sklearn_index_path = self.vector_dir / SKLEARN_INDEX_FILENAME
         self.vector_matrix_path = self.vector_dir / VECTOR_MATRIX_FILENAME
         self.metadata_path = self.vector_dir / METADATA_FILENAME
         self.error_tracker = error_tracker or ErrorTracker()
         self.vector_backend = (vector_backend or "auto").strip().lower()  # type: ignore[assignment]
         self._index = None
+        self._sklearn_index = None
         self._vectors: np.ndarray | None = None
         self._metadata: list[dict[str, Any]] = []
         self._payload: dict[str, Any] = {}
@@ -95,25 +92,35 @@ class LocalFaissVectorStore:
         if faiss is None:
             raise ClaimDenialError(
                 ErrorCode.RAG_VECTOR_INDEX_MISSING,
-                (
-                    "FAISS is not installed in the active Python environment. "
-                    "Install faiss-cpu, or use the local NumPy vector backend."
-                ),
+                "FAISS is not installed. Use vector_backend=sklearn for Docker/AWS.",
                 component="rag",
                 metadata={"stage": "import_faiss"},
             )
         return faiss
 
+    def _new_sklearn_index(self, embeddings: np.ndarray):
+        try:
+            from sklearn.neighbors import NearestNeighbors
+        except Exception as exc:
+            raise ClaimDenialError(
+                ErrorCode.RAG_VECTOR_INDEX_MISSING,
+                "scikit-learn NearestNeighbors is required for vector_backend=sklearn.",
+                component="rag",
+                metadata={"stage": "load_sklearn_nearest_neighbors"},
+            ) from exc
+        nn = NearestNeighbors(metric="cosine", algorithm="brute")
+        nn.fit(embeddings)
+        return nn
+
     def _select_build_backend(self) -> str:
         backend = self.vector_backend
-        if backend not in {"auto", "faiss", "numpy"}:
+        if backend not in {"auto", "sklearn", "faiss", "numpy"}:
             raise ValueError(f"Unknown vector backend: {backend}")
-        if backend == "numpy":
-            return "numpy"
+        if backend == "auto":
+            return "sklearn"
         if backend == "faiss":
             self._import_faiss_or_raise()
-            return "faiss"
-        return "faiss" if self._try_import_faiss() is not None else "numpy"
+        return backend
 
     def build(
         self,
@@ -139,6 +146,7 @@ class LocalFaissVectorStore:
         np.save(self.vector_matrix_path, embeddings)
 
         faiss_index_written = False
+        sklearn_index_written = False
         if selected_backend == "faiss":
             faiss = self._import_faiss_or_raise()
             index = faiss.IndexFlatIP(int(embeddings.shape[1]))
@@ -146,20 +154,21 @@ class LocalFaissVectorStore:
             faiss.write_index(index, str(self.index_path))
             self._index = index
             faiss_index_written = True
-            logger.info(
-                "faiss_policy_index_built",
-                rows=len(metadata),
-                dim=int(embeddings.shape[1]),
-                path=str(self.index_path),
-            )
+            index_path = str(self.index_path)
+            logger.info("faiss_policy_index_built", rows=len(metadata), dim=int(embeddings.shape[1]), path=index_path)
+        elif selected_backend == "sklearn":
+            nn = self._new_sklearn_index(embeddings)
+            with open(self.sklearn_index_path, "wb") as f:
+                pickle.dump(nn, f)
+            self._sklearn_index = nn
+            sklearn_index_written = True
+            index_path = str(self.sklearn_index_path)
+            logger.info("sklearn_policy_index_built", rows=len(metadata), dim=int(embeddings.shape[1]), path=index_path)
         else:
+            # Backward compatibility only. Do not use for Docker/AWS deployment.
             self._index = None
-            logger.warning(
-                "faiss_unavailable_using_numpy_vector_backend",
-                rows=len(metadata),
-                dim=int(embeddings.shape[1]),
-                vector_matrix_path=str(self.vector_matrix_path),
-            )
+            index_path = str(self.vector_matrix_path)
+            logger.warning("numpy_vector_backend_selected_backward_compatibility", rows=len(metadata), dim=int(embeddings.shape[1]))
 
         embedding_metadata = dict(embedding_metadata or {})
         payload = {
@@ -168,8 +177,10 @@ class LocalFaissVectorStore:
             "embedding_model": embedding_model or embedding_metadata.get("embedding_model") or "unknown",
             "vector_backend": selected_backend,
             "faiss_index_written": bool(faiss_index_written),
+            "sklearn_index_written": bool(sklearn_index_written),
             "vector_matrix_path": str(self.vector_matrix_path),
-            "index_path": str(self.index_path) if faiss_index_written else str(self.vector_matrix_path),
+            "sklearn_index_path": str(self.sklearn_index_path) if sklearn_index_written else None,
+            "index_path": index_path,
             "row_count": int(embeddings.shape[0]),
             "metadata": metadata,
             **{k: v for k, v in embedding_metadata.items() if k not in {"metadata"}},
@@ -197,6 +208,7 @@ class LocalFaissVectorStore:
             "embedding_model": payload["embedding_model"],
             "vector_backend": selected_backend,
             "faiss_index_written": bool(faiss_index_written),
+            "sklearn_index_written": bool(sklearn_index_written),
         }
 
     def load(self) -> "LocalFaissVectorStore":
@@ -212,25 +224,15 @@ class LocalFaissVectorStore:
         self._payload = payload
         self._metadata = list(payload.get("metadata", []))
         requested_backend = self.vector_backend
-        stored_backend = str(payload.get("vector_backend") or "auto")
+        stored_backend = str(payload.get("vector_backend") or "sklearn")
 
         matrix_path = Path(payload.get("vector_matrix_path") or self.vector_matrix_path)
         if not matrix_path.is_absolute():
             matrix_path = self.vector_dir / matrix_path
-        if matrix_path.exists():
-            self._vectors = _row_normalize(np.load(matrix_path))
-        else:
-            self._vectors = None
+        self._vectors = _row_normalize(np.load(matrix_path)) if matrix_path.exists() else None
 
-        use_faiss = False
-        if requested_backend == "faiss":
-            use_faiss = True
-        elif requested_backend == "numpy":
-            use_faiss = False
-        else:
-            use_faiss = stored_backend == "faiss" and self.index_path.exists() and self._try_import_faiss() is not None
-
-        if use_faiss:
+        selected_backend = requested_backend if requested_backend != "auto" else stored_backend
+        if selected_backend == "faiss":
             faiss = self._import_faiss_or_raise()
             if not self.index_path.exists():
                 raise ClaimDenialError(
@@ -241,18 +243,32 @@ class LocalFaissVectorStore:
                 )
             self._index = faiss.read_index(str(self.index_path))
             self._loaded_backend = "faiss"
+        elif selected_backend == "sklearn":
+            sklearn_path = Path(payload.get("sklearn_index_path") or self.sklearn_index_path)
+            if not sklearn_path.is_absolute():
+                sklearn_path = self.vector_dir / sklearn_path
+            if not sklearn_path.exists():
+                if self._vectors is None:
+                    raise ClaimDenialError(
+                        ErrorCode.RAG_VECTOR_INDEX_MISSING,
+                        f"sklearn index and vector matrix are both missing under {self.vector_dir}.",
+                        component="rag",
+                        metadata={"stage": "load_sklearn_vector_index"},
+                    )
+                # Rebuild in-memory index if matrix exists but pickle is absent.
+                self._sklearn_index = self._new_sklearn_index(self._vectors)
+            else:
+                with open(sklearn_path, "rb") as f:
+                    self._sklearn_index = pickle.load(f)
+            self._loaded_backend = "sklearn"
         else:
             if self._vectors is None:
                 raise ClaimDenialError(
                     ErrorCode.RAG_VECTOR_INDEX_MISSING,
-                    (
-                        f"Vector matrix missing: {matrix_path}. Cannot use NumPy fallback. "
-                        "Re-run run_policy_ingest.py."
-                    ),
+                    f"Vector matrix missing: {matrix_path}.",
                     component="rag",
-                    metadata={"stage": "load_vector_index", "path": str(matrix_path)},
+                    metadata={"stage": "load_numpy_compat_vector_index", "path": str(matrix_path)},
                 )
-            self._index = None
             self._loaded_backend = "numpy"
 
         logger.info(
@@ -271,7 +287,7 @@ class LocalFaissVectorStore:
             self._payload = json.loads(self.metadata_path.read_text(encoding="utf-8"))
         return self._payload
 
-    def _search_numpy(self, query: np.ndarray, *, top_k: int) -> tuple[np.ndarray, np.ndarray]:
+    def _search_numpy_compat(self, query: np.ndarray, *, top_k: int) -> tuple[np.ndarray, np.ndarray]:
         if self._vectors is None:
             if self.vector_matrix_path.exists():
                 self._vectors = _row_normalize(np.load(self.vector_matrix_path))
@@ -280,15 +296,29 @@ class LocalFaissVectorStore:
                     ErrorCode.RAG_VECTOR_INDEX_MISSING,
                     "Vector matrix not loaded. Run run_policy_ingest.py first.",
                     component="rag",
-                    metadata={"stage": "search_numpy"},
+                    metadata={"stage": "search_numpy_compat"},
                 )
         scores = (self._vectors @ query.reshape(-1)).astype("float32")
         if scores.size == 0:
             return np.asarray([], dtype="float32"), np.asarray([], dtype="int64")
         k = max(1, min(int(top_k), scores.size))
-        # Stable sort by descending score; mergesort preserves corpus order for ties.
         indices = np.argsort(-scores, kind="mergesort")[:k]
         return scores[indices], indices.astype("int64")
+
+    def _search_sklearn(self, query: np.ndarray, *, top_k: int) -> tuple[np.ndarray, np.ndarray]:
+        if self._sklearn_index is None:
+            if self._vectors is None:
+                raise ClaimDenialError(
+                    ErrorCode.RAG_VECTOR_INDEX_MISSING,
+                    "sklearn index not loaded. Run run_policy_ingest.py first.",
+                    component="rag",
+                    metadata={"stage": "search_sklearn"},
+                )
+            self._sklearn_index = self._new_sklearn_index(self._vectors)
+        distances, indices = self._sklearn_index.kneighbors(query, n_neighbors=top_k)
+        # NearestNeighbors with cosine returns distance where 0 is identical.
+        scores = (1.0 - distances[0]).astype("float32")
+        return scores, indices[0].astype("int64")
 
     def search(self, query_vector: np.ndarray, *, top_k: int = 5, min_score: float | None = None) -> list[PolicySearchResult]:
         if self._loaded_backend is None:
@@ -300,8 +330,12 @@ class LocalFaissVectorStore:
             scores, indices = self._index.search(query, k)
             score_list = scores[0].tolist()
             index_list = indices[0].tolist()
+        elif self._loaded_backend == "sklearn":
+            scores, indices = self._search_sklearn(query, top_k=k)
+            score_list = scores.tolist()
+            index_list = indices.tolist()
         else:
-            scores, indices = self._search_numpy(query, top_k=k)
+            scores, indices = self._search_numpy_compat(query, top_k=k)
             score_list = scores.tolist()
             index_list = indices.tolist()
 
@@ -324,5 +358,4 @@ class LocalFaissVectorStore:
         return results
 
 
-# Clearer alias for new code. Kept alongside LocalFaissVectorStore for backward compatibility.
 LocalVectorStore = LocalFaissVectorStore

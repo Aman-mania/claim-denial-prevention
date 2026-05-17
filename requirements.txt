@@ -43,3 +43,6 @@ uvicorn[standard]>=0.30,<1.0
 
 # Week 8/AWS: RDS PostgreSQL auth database
 psycopg[binary]>=3.1,<4.0
+
+# Optional AWS helpers for Phase 8/9 scripts.
+boto3>=1.34,<2.0

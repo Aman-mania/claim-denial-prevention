@@ -3,7 +3,7 @@
 
 Examples:
     python tools/run_tests.py --suite week7
-    python tools/run_tests.py --suite api --fast
+    python tools/run_tests.py --suite phase8
     python tools/run_tests.py --suite all
 """
 
@@ -20,11 +20,15 @@ SUITES: dict[str, list[str]] = {
     "week5": ["tests/explainability"],
     "week6": ["tests/rag"],
     "week7": ["tests/rules", "tests/agent", "tests/auth", "tests/api", "tests/product_ui"],
+    "week8": ["tests/config", "tests/deployment"],
+    "phase8": ["tests/config", "tests/deployment"],
     "rules": ["tests/rules"],
     "agent": ["tests/agent"],
     "auth": ["tests/auth"],
     "api": ["tests/api"],
     "product_ui": ["tests/product_ui"],
+    "config": ["tests/config"],
+    "deployment": ["tests/deployment"],
     "dashboard": ["tests/dashboard"],
     "explainability": ["tests/explainability"],
     "observability": ["tests/observability"],

@@ -1,0 +1,4 @@
+# Week 7 API/RDS dependencies. Install when network allows.
+fastapi>=0.111,<1.0
+uvicorn[standard]>=0.30,<1.0
+psycopg[binary]>=3.1,<4.0       # RDS PostgreSQL auth/RBAC

@@ -2,13 +2,33 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import requests
 
-DEFAULT_API_BASE_URL = os.getenv("CLAIM_DENIAL_API_BASE_URL", "http://localhost:8000").rstrip("/")
-DEFAULT_TIMEOUT_SECONDS = float(os.getenv("CLAIM_DENIAL_UI_API_TIMEOUT_SECONDS", "45"))
+try:
+    from src.config.runtime import get_runtime_settings
+except Exception:  # pragma: no cover - defensive fallback for unusual import paths
+    get_runtime_settings = None  # type: ignore[assignment]
+
+
+def _default_base_url() -> str:
+    if get_runtime_settings is None:
+        return "http://localhost:8000"
+    return get_runtime_settings().ui_api_base_url
+
+
+def _default_timeout() -> float:
+    if get_runtime_settings is None:
+        return 45.0
+    return get_runtime_settings().ui_api_timeout_seconds
+
+
+# Backward-compatible constants used by product_ui/app.py and older tests.
+# They are evaluated from the centralized runtime config so Docker/AWS can still
+# switch behavior by environment variables instead of scattered if/else logic.
+DEFAULT_API_BASE_URL = _default_base_url()
+DEFAULT_API_TIMEOUT_SECONDS = _default_timeout()
 
 
 class ApiClientError(RuntimeError):
@@ -17,9 +37,9 @@ class ApiClientError(RuntimeError):
 
 class ClaimDenialApiClient:
     def __init__(self, *, base_url: str | None = None, token: str | None = None, timeout: float | None = None) -> None:
-        self.base_url = (base_url or DEFAULT_API_BASE_URL).rstrip("/")
+        self.base_url = (base_url or _default_base_url()).rstrip("/")
         self.token = token
-        self.timeout = DEFAULT_TIMEOUT_SECONDS if timeout is None else float(timeout)
+        self.timeout = _default_timeout() if timeout is None else float(timeout)
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}

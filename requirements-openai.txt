@@ -1,0 +1,2 @@
+# Optional OpenAI presentation layer. Not required for deterministic agent tests.
+openai>=1.40,<3.0
